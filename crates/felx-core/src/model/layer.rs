@@ -18,6 +18,10 @@ pub struct Layer {
     pub out_frame: u32,
     pub transform: Transform,
     pub effects: Vec<Effect>,
+    /// Layer this one is parented to (transform-inherited from). Cycles are
+    /// rejected by [`Project::validate`].
+    #[serde(default)]
+    pub parent: Option<LayerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -54,6 +58,7 @@ mod tests {
             out_frame: 90,
             transform: Transform::default(),
             effects: vec![],
+            parent: None,
         };
         assert_eq!(l.duration(), 60);
     }
@@ -68,6 +73,7 @@ mod tests {
             out_frame: 30,
             transform: Transform::default(),
             effects: vec![],
+            parent: None,
         };
         assert_eq!(l.duration(), 0);
     }

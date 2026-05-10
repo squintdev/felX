@@ -96,6 +96,21 @@ impl Project {
                         comp_duration: comp.duration_frames,
                     });
                 }
+                if has_parent_cycle(&comp.layers, layer.id) {
+                    errors.push(ValidationError::ParentCycle {
+                        comp: comp.id,
+                        layer: layer.id,
+                    });
+                }
+                if let Some(parent_id) = layer.parent
+                    && comp.layers.iter().all(|l| l.id != parent_id)
+                {
+                    errors.push(ValidationError::UnknownParent {
+                        comp: comp.id,
+                        layer: layer.id,
+                        parent: parent_id,
+                    });
+                }
                 match &layer.kind {
                     crate::model::LayerKind::Video { asset }
                     | crate::model::LayerKind::Image { asset }
@@ -168,6 +183,36 @@ pub enum ValidationError {
         comp: CompId,
         layer: crate::model::LayerId,
     },
+    UnknownParent {
+        comp: CompId,
+        layer: crate::model::LayerId,
+        parent: crate::model::LayerId,
+    },
+    ParentCycle {
+        comp: CompId,
+        layer: crate::model::LayerId,
+    },
+}
+
+fn has_parent_cycle(layers: &[crate::model::Layer], start: crate::model::LayerId) -> bool {
+    let mut current = start;
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(current);
+    loop {
+        let parent = layers
+            .iter()
+            .find(|l| l.id == current)
+            .and_then(|l| l.parent);
+        match parent {
+            None => return false,
+            Some(p) => {
+                if !seen.insert(p) {
+                    return true;
+                }
+                current = p;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +314,40 @@ mod tests {
     fn empty_project_validates() {
         let p = Project::new();
         assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn parent_cycle_is_an_error() {
+        let mut p = Project::new();
+        let comp_id = p.add_composition("main", 100, 100);
+        let comp = p.composition_mut(comp_id).unwrap();
+        comp.duration_frames = 100;
+        let a = comp.add_layer("a", LayerKind::Null, 0, 100);
+        let b = comp.add_layer("b", LayerKind::Null, 0, 100);
+        comp.layer_mut(a).unwrap().parent = Some(b);
+        comp.layer_mut(b).unwrap().parent = Some(a);
+        let errors = p.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ParentCycle { .. }))
+        );
+    }
+
+    #[test]
+    fn unknown_parent_is_an_error() {
+        use crate::model::LayerId;
+        let mut p = Project::new();
+        let comp_id = p.add_composition("main", 100, 100);
+        let comp = p.composition_mut(comp_id).unwrap();
+        comp.duration_frames = 100;
+        let a = comp.add_layer("a", LayerKind::Null, 0, 100);
+        comp.layer_mut(a).unwrap().parent = Some(LayerId(999));
+        let errors = p.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnknownParent { .. }))
+        );
     }
 }

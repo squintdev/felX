@@ -55,6 +55,7 @@ impl Composition {
             out_frame,
             transform: Transform::default(),
             effects: Vec::new(),
+            parent: None,
         });
         id
     }

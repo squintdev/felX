@@ -11,6 +11,18 @@ pub enum Curve<T> {
     Animated(Vec<Keyframe<T>>),
 }
 
+/// What a curve does at times outside its keyframe range. Default is
+/// [`OutOfRange::Clamp`] (hold the boundary keyframe's value).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutOfRange {
+    #[default]
+    Clamp,
+    /// Repeat the keyframe span. Frame N+span behaves like frame N.
+    Cycle,
+    /// Mirror back and forth.
+    PingPong,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe<T> {
     pub t: Rational,
@@ -90,16 +102,61 @@ impl<T: Clone> Curve<T> {
 }
 
 impl<T: Lerp + Clone> Curve<T> {
-    /// Sample at a specific time on the comp's timebase.
+    /// Sample at a specific time on the comp's timebase. Out-of-range
+    /// behavior defaults to [`OutOfRange::Clamp`].
     pub fn sample_at_time(&self, time: Rational) -> T {
+        self.sample_at_time_with(time, OutOfRange::Clamp)
+    }
+
+    pub fn sample_at_time_with(&self, time: Rational, mode: OutOfRange) -> T {
         match self {
             Curve::Static(v) => v.clone(),
             Curve::Animated(kfs) if kfs.is_empty() => {
                 panic!("animated curve must have at least one keyframe")
             }
-            Curve::Animated(kfs) => sample_animated(kfs, time),
+            Curve::Animated(kfs) => {
+                let remapped = remap_for_out_of_range(kfs, time, mode);
+                sample_animated(kfs, remapped)
+            }
         }
     }
+}
+
+fn remap_for_out_of_range<T>(kfs: &[Keyframe<T>], time: Rational, mode: OutOfRange) -> Rational {
+    if matches!(mode, OutOfRange::Clamp) {
+        return time;
+    }
+    let first = kfs[0].t.as_seconds();
+    let last = kfs.last().unwrap().t.as_seconds();
+    let span = last - first;
+    if span <= 0.0 {
+        return time;
+    }
+    let t = time.as_seconds();
+    if t >= first && t <= last {
+        return time;
+    }
+    let mut offset = (t - first) % span;
+    if offset < 0.0 {
+        offset += span;
+    }
+    let mapped = match mode {
+        OutOfRange::Clamp => unreachable!(),
+        OutOfRange::Cycle => first + offset,
+        OutOfRange::PingPong => {
+            let cycles = (t - first).div_euclid(span) as i64;
+            if cycles % 2 == 0 {
+                first + offset
+            } else {
+                last - offset
+            }
+        }
+    };
+    // Convert back to a Rational. Use a fine timebase (1/1_000_000) so the
+    // remapped time is precise enough for any reasonable framerate.
+    let den: u32 = 1_000_000;
+    let num = (mapped * den as f64).round() as u32;
+    Rational::new(num, den)
 }
 
 impl<T: Default> Default for Curve<T> {
@@ -302,6 +359,44 @@ mod tests {
     fn lerp_int_rounds() {
         assert_eq!(0_i32.lerp(&10, 0.5), 5);
         assert_eq!(0_i32.lerp(&10, 0.07), 1);
+    }
+
+    #[test]
+    fn cycle_repeats_within_span() {
+        let c = Curve::Animated(vec![
+            Keyframe {
+                t: rat(0, 1),
+                v: 0.0_f32,
+                interp: InterpKind::Linear,
+            },
+            Keyframe {
+                t: rat(2, 1),
+                v: 1.0_f32,
+                interp: InterpKind::Linear,
+            },
+        ]);
+        // t=3 (one span past 2) should cycle back to t=1 → midpoint (0.5).
+        let v = c.sample_at_time_with(rat(3, 1), OutOfRange::Cycle);
+        assert!((v - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pingpong_mirrors() {
+        let c = Curve::Animated(vec![
+            Keyframe {
+                t: rat(0, 1),
+                v: 0.0_f32,
+                interp: InterpKind::Linear,
+            },
+            Keyframe {
+                t: rat(2, 1),
+                v: 1.0_f32,
+                interp: InterpKind::Linear,
+            },
+        ]);
+        // t=3 → one span into the reverse leg → 0.5 mirrored = 0.5.
+        let v = c.sample_at_time_with(rat(3, 1), OutOfRange::PingPong);
+        assert!((v - 0.5).abs() < 1e-3);
     }
 
     #[test]
