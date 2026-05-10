@@ -2,10 +2,10 @@
 
 use crate::model::{AssetId, CompId, Effect, Transform};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayerId(pub u32);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layer {
     pub id: LayerId,
     pub name: String,
@@ -20,7 +20,7 @@ pub struct Layer {
     pub effects: Vec<Effect>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerKind {
     Video { asset: AssetId },
     Image { asset: AssetId },

@@ -3,7 +3,7 @@
 //! Story F-019 adds the parameter-system tree; here an effect carries only
 //! its identifier (matching `effects/<id>/manifest.ron`) and an enabled flag.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Effect {
     pub id: String,
     pub enabled: bool,

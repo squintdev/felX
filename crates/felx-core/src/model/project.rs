@@ -6,12 +6,14 @@ use std::path::PathBuf;
 /// Bumped whenever the on-disk project schema changes incompatibly.
 pub const FORMAT_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub format_version: u32,
     pub assets: Vec<Asset>,
     pub compositions: Vec<Composition>,
+    #[serde(default)]
     next_asset_id: u32,
+    #[serde(default)]
     next_comp_id: u32,
 }
 
@@ -55,6 +57,21 @@ impl Project {
 
     pub fn composition_mut(&mut self, id: CompId) -> Option<&mut Composition> {
         self.compositions.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Recompute internal allocators after deserialize, in case the on-disk
+    /// format omitted them (older format). Walks compositions to fix their
+    /// per-comp `next_layer_id` too.
+    pub fn fixup_after_load(&mut self) {
+        if self.next_asset_id == 0 {
+            self.next_asset_id = self.assets.iter().map(|a| a.id.0).max().unwrap_or(0) + 1;
+        }
+        if self.next_comp_id == 0 {
+            self.next_comp_id = self.compositions.iter().map(|c| c.id.0).max().unwrap_or(0) + 1;
+        }
+        for comp in &mut self.compositions {
+            comp.fixup_after_load();
+        }
     }
 
     /// Walk the project and return all structural invariant violations.

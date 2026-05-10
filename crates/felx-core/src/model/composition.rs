@@ -3,10 +3,10 @@
 
 use crate::model::{AssetId, Effect, Framerate, Layer, LayerId, LayerKind, Transform};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CompId(pub u32);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Composition {
     pub id: CompId,
     pub name: String,
@@ -18,6 +18,7 @@ pub struct Composition {
     /// Background color shown where no layer is opaque. RGBA, linear-light.
     pub background: [f32; 4],
     pub layers: Vec<Layer>,
+    #[serde(default)]
     next_layer_id: u32,
 }
 
@@ -83,6 +84,14 @@ impl Composition {
     pub fn push_effect(&mut self, layer: LayerId, effect: Effect) {
         if let Some(l) = self.layer_mut(layer) {
             l.effects.push(effect);
+        }
+    }
+
+    /// Recompute `next_layer_id` from existing layer IDs. Called after
+    /// deserialize for files that didn't persist the allocator.
+    pub fn fixup_after_load(&mut self) {
+        if self.next_layer_id == 0 {
+            self.next_layer_id = self.layers.iter().map(|l| l.id.0).max().unwrap_or(0) + 1;
         }
     }
 }

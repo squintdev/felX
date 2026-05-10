@@ -2,7 +2,7 @@
 //! variant (bezier tangents, hold/linear interp). For now only the static
 //! form is supported so transforms can compile.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Curve<T> {
     Static(T),
 }

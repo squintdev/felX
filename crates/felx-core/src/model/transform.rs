@@ -2,7 +2,7 @@
 
 use crate::model::Curve;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Transform {
     /// Position in composition pixels, relative to the comp origin.
     pub position: Curve<[f32; 2]>,

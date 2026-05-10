@@ -5,7 +5,7 @@
 //! the type is a plain pair, and callers are responsible for non-zero
 //! denominators.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Rational {
     pub num: u32,
     pub den: u32,
@@ -21,7 +21,7 @@ impl Rational {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Framerate(pub Rational);
 
 impl Framerate {
@@ -45,7 +45,19 @@ impl Default for Framerate {
 }
 
 /// Frame index relative to the start of a composition's timeline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Frame(pub u32);
 
 #[cfg(test)]
