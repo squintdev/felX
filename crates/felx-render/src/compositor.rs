@@ -3,9 +3,11 @@
 //! first visible layer's source through its effect stack.
 
 use crate::cpu_pass::run_cpu_pass;
+use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
+use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::{Renderer, RendererError};
 use felx_core::model::{CompId, Effect, Layer, LayerKind, Project};
@@ -154,6 +156,8 @@ impl TexturePool {
 pub struct Compositor {
     renderer: Renderer,
     gain: Gain,
+    cc_toner: CcToner,
+    srgb_wrap: SrgbWrap,
     pool: TexturePool,
     cache: FrameCache,
 }
@@ -165,9 +169,13 @@ impl Compositor {
 
     pub fn with_cache_capacity(renderer: Renderer, cache_entries: usize) -> Self {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
+        let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
+        let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
+            cc_toner,
+            srgb_wrap,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
         }
@@ -328,11 +336,77 @@ impl Compositor {
                 self.pool.release(input);
                 Ok(output)
             }
+            "cc_toner" => self.apply_cc_toner(eff, input, w, h),
             other => {
                 warn!(effect_id = other, "skipping unknown effect");
                 Ok(input)
             }
         }
+    }
+
+    fn apply_cc_toner(
+        &mut self,
+        eff: &Effect,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let mode = eff
+            .values
+            .enum_str("tones")
+            .and_then(TonesMode::from_id)
+            .unwrap_or(TonesMode::Tritone);
+        let highlights = eff
+            .values
+            .color("highlights")
+            .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        let brights = eff
+            .values
+            .color("brights")
+            .unwrap_or([0.75, 0.75, 0.75, 1.0]);
+        let midtones = eff.values.color("midtones").unwrap_or([0.5, 0.5, 0.5, 1.0]);
+        let darktones = eff
+            .values
+            .color("darktones")
+            .unwrap_or([0.25, 0.25, 0.25, 1.0]);
+        let shadows = eff.values.color("shadows").unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let blend = eff.values.float("blend").unwrap_or(0.0);
+        let params = CcTonerParams::pack(
+            mode, highlights, brights, midtones, darktones, shadows, blend,
+        );
+
+        let encoded = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let toned = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let decoded = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let enc_view = encoded.create_view(&wgpu::TextureViewDescriptor::default());
+        let toned_view = toned.create_view(&wgpu::TextureViewDescriptor::default());
+        let dec_view = decoded.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 1) Encode linear → sRGB-encoded (the wrap pipeline submits its own
+        //    encoder).
+        self.srgb_wrap.encode(&self.renderer, &in_view, &enc_view);
+
+        // 2) Run CC Toner on the encoded texture.
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.cc_toner"),
+                });
+        self.cc_toner
+            .render(&self.renderer, &mut cmd, &enc_view, &toned_view, params);
+        self.renderer.queue().submit(Some(cmd.finish()));
+
+        // 3) Decode sRGB-encoded → linear back.
+        self.srgb_wrap
+            .decode(&self.renderer, &toned_view, &dec_view);
+
+        self.pool.release(input);
+        self.pool.release(encoded);
+        self.pool.release(toned);
+        Ok(decoded)
     }
 
     fn resolve_layer_source(
