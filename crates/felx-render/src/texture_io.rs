@@ -28,7 +28,8 @@ pub fn upload_image(renderer: &Renderer, image: &RgbaImage) -> wgpu::Texture {
         format: COMPOSITOR_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     renderer.queue().write_texture(
