@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 felx-core = { path = "../felx-core" }
+felx-media = { path = "../felx-media" }
 tracing = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
