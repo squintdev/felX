@@ -1,0 +1,9 @@
+// CPU-pass effect — inverts RGB; alpha pass-through.
+(
+    id: "invert",
+    display_name: "Invert",
+    category: "Color",
+    working_space: "linear",
+    pass: "cpu",
+    parameters: [],
+)

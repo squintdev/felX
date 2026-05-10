@@ -5,6 +5,7 @@
 //! visual-regression harness; the borrowed constructor is for hosting under
 //! `eframe` (per ADR 0002), which owns the device for the live preview.
 
+pub mod cpu_pass;
 pub mod effects;
 mod renderer;
 pub mod texture_io;

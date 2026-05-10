@@ -1,5 +1,6 @@
-//! GPU effect implementations. Each effect's WGSL lives in
+//! Effect implementations. GPU effects ship a WGSL shader under
 //! `<workspace>/effects/<id>/effect.wgsl`; the Rust runtime here owns the
-//! pipeline and bind-group plumbing.
+//! pipeline and bind-group plumbing. CPU-pass effects are pure Rust.
 
 pub mod gain;
+pub mod invert;
