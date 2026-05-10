@@ -92,6 +92,55 @@ fn precomp_resizes_inner_to_outer_dims() {
 }
 
 #[test]
+fn precomp_time_offset_picks_a_different_inner_frame() {
+    let Some(renderer) = try_renderer() else {
+        return;
+    };
+    let mut p = Project::new();
+
+    // Inner: frame 0..=4 are red, frame 5..=9 are blue. Achieve this with
+    // two layers whose in/out gate them.
+    let inner_id = p.add_composition("inner", 4, 4);
+    let inner = p.composition_mut(inner_id).unwrap();
+    inner.duration_frames = 10;
+    inner.background = [0.0, 0.0, 0.0, 1.0];
+    inner.add_layer(
+        "red_first",
+        LayerKind::Solid {
+            color: [1.0, 0.0, 0.0, 1.0],
+        },
+        0,
+        5,
+    );
+    inner.add_layer(
+        "blue_second",
+        LayerKind::Solid {
+            color: [0.0, 0.0, 1.0, 1.0],
+        },
+        5,
+        10,
+    );
+
+    // Outer: hosts the inner pre-comp with time_offset_frames = +6.
+    // At outer frame 0, inner sees source frame 6 → blue.
+    let outer_id = p.add_composition("outer", 4, 4);
+    let outer = p.composition_mut(outer_id).unwrap();
+    outer.duration_frames = 10;
+    outer.background = [0.0, 0.0, 0.0, 1.0];
+    let nested_id = outer.add_layer("nested", LayerKind::Composition { comp: inner_id }, 0, 10);
+    outer.layer_mut(nested_id).unwrap().time_offset_frames = 6;
+
+    let mut runtime = Compositor::new(renderer);
+    let tex = runtime.render(&p, outer_id, 0).unwrap();
+    let img = download_image(runtime.renderer(), &tex);
+    let pixel = *img.get_pixel(2, 2);
+    assert!(
+        pixel[2] > pixel[0],
+        "with offset=+6, frame 0 of outer should pick up the blue half of inner: {pixel:?}"
+    );
+}
+
+#[test]
 fn precomp_self_reference_returns_cycle_error() {
     let Some(renderer) = try_renderer() else {
         return;

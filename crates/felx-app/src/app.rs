@@ -295,6 +295,20 @@ impl FelxApp {
                         comp.move_layer_down(id);
                     }
                 }
+                LayerAction::SetTimeOffset(id, offset) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(layer) = comp.layer_mut(id)
+                    {
+                        layer.time_offset_frames = offset;
+                    }
+                }
+                LayerAction::SetTimeScale(id, scale) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(layer) = comp.layer_mut(id)
+                    {
+                        layer.time_scale = scale;
+                    }
+                }
             }
         }
         if dirty {

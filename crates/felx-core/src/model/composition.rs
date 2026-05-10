@@ -58,6 +58,8 @@ impl Composition {
             parent: None,
             blend_mode: crate::model::BlendMode::default(),
             track_matte: None,
+            time_offset_frames: 0,
+            time_scale: 1.0,
         });
         id
     }

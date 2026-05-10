@@ -462,12 +462,23 @@ impl Compositor {
         visiting: &mut std::collections::HashSet<u32>,
     ) -> Result<wgpu::Texture, CompositorError> {
         let mut current_tex = if let LayerKind::Composition { comp: inner_id } = &layer.kind {
-            // Pre-comp: render the inner comp recursively, then resize its
-            // output to the outer's render dims via a CPU readback. The
-            // GPU-direct blit-resize is a follow-up; this keeps the v1
-            // path simple and correctness-focused.
+            // Pre-comp: render the inner comp recursively, applying the
+            // outer layer's time remap (offset + scale) to derive the inner
+            // comp's playhead. Then resize its output to the outer's render
+            // dims via a CPU readback. The GPU-direct blit-resize is a
+            // follow-up; this keeps the v1 path simple and correctness-
+            // focused.
             let _s = debug_span!("compositor.precomp", inner = inner_id.0).entered();
-            let inner_tex = self.render_at_inner(project, *inner_id, frame, scale, visiting)?;
+            let source_frame = layer.source_frame_for(frame);
+            // Clamp source_frame to inner's last valid frame so out-of-range
+            // remap does not blow up the visibility filter inside the inner
+            // render.
+            let inner = project
+                .composition(*inner_id)
+                .ok_or(CompositorError::UnknownComposition)?;
+            let max_frame = inner.duration_frames.saturating_sub(1);
+            let bounded = source_frame.min(max_frame);
+            let inner_tex = self.render_at_inner(project, *inner_id, bounded, scale, visiting)?;
             self.resize_to(inner_tex, rw, rh)
         } else {
             let source_image = {

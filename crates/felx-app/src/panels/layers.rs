@@ -13,6 +13,8 @@ pub enum LayerAction {
     Delete(LayerId),
     MoveUp(LayerId),
     MoveDown(LayerId),
+    SetTimeOffset(LayerId, i32),
+    SetTimeScale(LayerId, f32),
 }
 
 pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<LayerAction> {
@@ -35,6 +37,52 @@ pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<L
                 .italics(),
         );
         return actions;
+    }
+
+    // Selected-layer properties strip (time remap). Only meaningful for
+    // time-driven kinds; for static kinds we still show the controls so
+    // users can tell they're available, but they're functionally no-ops.
+    if let Some(sel_id) = selected
+        && let Some(layer) = comp.layer(sel_id)
+    {
+        ui.collapsing("Time remap", |ui| {
+            let mut offset = layer.time_offset_frames;
+            let mut scale = layer.time_scale;
+            ui.horizontal(|ui| {
+                ui.label("offset (frames)");
+                if ui
+                    .add(egui::DragValue::new(&mut offset).speed(0.5))
+                    .changed()
+                {
+                    actions.push(LayerAction::SetTimeOffset(sel_id, offset));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("scale");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut scale)
+                            .speed(0.05)
+                            .range(-8.0..=8.0),
+                    )
+                    .changed()
+                {
+                    actions.push(LayerAction::SetTimeScale(sel_id, scale));
+                }
+            });
+            if !matches!(
+                layer.kind,
+                LayerKind::Composition { .. } | LayerKind::Video { .. }
+            ) {
+                ui.label(
+                    RichText::new("(only affects Composition / Video layers)")
+                        .color(Color32::from_gray(120))
+                        .small()
+                        .italics(),
+                );
+            }
+        });
+        ui.separator();
     }
 
     ScrollArea::vertical().show(ui, |ui| {
