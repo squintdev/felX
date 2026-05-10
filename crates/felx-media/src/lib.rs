@@ -1,10 +1,12 @@
 //! Video decode / encode / probe via rsmpeg + system FFmpeg.
 
+pub mod audio;
 pub mod decode;
 pub mod encode;
 pub mod error;
 pub mod info;
 
+pub use audio::{AudioInfo, CHANNELS, DEFAULT_SAMPLE_RATE, DecodedAudio, decode_file, probe_audio};
 pub use decode::{DecodedFrame, FfmpegDecoder, HwaccelKind, VideoDecoder, VideoFrameRgba};
 pub use encode::{EncodeOptions, H264Encoder};
 pub use error::DecodeError;

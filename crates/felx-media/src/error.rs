@@ -7,6 +7,9 @@ pub enum DecodeError {
     Io(std::io::Error),
     Ffmpeg(ffmpeg_next::Error),
     NoVideoStream(PathBuf),
+    NoAudioStream,
+    Open(ffmpeg_next::Error),
+    Decoder(ffmpeg_next::Error),
     UnsupportedCodec(String),
     SeekFailed { target_seconds: f64 },
     HwaccelInitFailed { kind: &'static str, detail: String },
@@ -18,6 +21,9 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Io(e) => write!(f, "io: {e}"),
             DecodeError::Ffmpeg(e) => write!(f, "ffmpeg: {e}"),
             DecodeError::NoVideoStream(p) => write!(f, "no video stream in {}", p.display()),
+            DecodeError::NoAudioStream => write!(f, "no audio stream"),
+            DecodeError::Open(e) => write!(f, "ffmpeg open: {e}"),
+            DecodeError::Decoder(e) => write!(f, "ffmpeg decoder: {e}"),
             DecodeError::UnsupportedCodec(c) => write!(f, "unsupported codec: {c}"),
             DecodeError::SeekFailed { target_seconds } => {
                 write!(f, "seek to {target_seconds}s failed")
@@ -33,7 +39,7 @@ impl std::error::Error for DecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             DecodeError::Io(e) => Some(e),
-            DecodeError::Ffmpeg(e) => Some(e),
+            DecodeError::Ffmpeg(e) | DecodeError::Open(e) | DecodeError::Decoder(e) => Some(e),
             _ => None,
         }
     }
