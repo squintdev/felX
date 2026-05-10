@@ -5,4 +5,5 @@
 pub mod cc_toner;
 pub mod gain;
 pub mod invert;
+pub mod squint_diffusion;
 pub mod signal;

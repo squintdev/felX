@@ -8,6 +8,7 @@ use crate::cpu_pass::run_cpu_pass;
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
+use crate::effects::squint_diffusion::{self, DiffusionParams};
 use crate::effects::signal::{Signal, SignalParams};
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::matte_pass::{MatteParams, MattePass};
@@ -568,6 +569,14 @@ impl Compositor {
             }
             "cc_toner" => self.apply_cc_toner(eff, input, w, h),
             "signal" => self.apply_signal(eff, input, w, h),
+            "squint_diffusion" => {
+                let params = build_diffusion_params(eff);
+                let output = run_cpu_pass(&self.renderer, &input, "squint_diffusion", |img| {
+                    squint_diffusion::diffuse_in_place(img, &params);
+                });
+                self.pool.release(input);
+                Ok(output)
+            }
             other => {
                 warn!(effect_id = other, "skipping unknown effect");
                 Ok(input)
@@ -718,4 +727,21 @@ impl Compositor {
             }
         }
     }
+}
+
+fn build_diffusion_params(eff: &Effect) -> DiffusionParams {
+    let error_weight = eff.values.float("error_weight").unwrap_or(0.75);
+    let alpha = eff.values.float("alpha").unwrap_or(1.0);
+    let n = eff.values.int("num_colors").unwrap_or(4).clamp(2, 6) as usize;
+    let mut palette = Vec::with_capacity(n);
+    for i in 1..=6 {
+        if let Some(c) = eff.values.color(&format!("color_{i}")) {
+            palette.push(c);
+        }
+    }
+    palette.truncate(n);
+    if palette.len() < 2 {
+        palette = vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
+    }
+    DiffusionParams::new(error_weight, alpha, palette)
 }
