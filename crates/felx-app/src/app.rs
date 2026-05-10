@@ -1,0 +1,200 @@
+//! The eframe `App` impl. Owns the project, the compositor, and the egui
+//! texture handle that mirrors the compositor's output for display.
+
+use eframe::egui_wgpu::RenderState;
+use eframe::{App, CreationContext, Frame};
+use egui::{CentralPanel, Color32, Context, Sense, TextureId, Vec2};
+use felx_core::model::{CompId, Effect, Project};
+use felx_render::compositor::{Compositor, CompositorError};
+use felx_render::{AdapterInfo, Renderer};
+use tracing::{error, info};
+
+pub struct FelxApp {
+    project: Project,
+    comp_id: CompId,
+    current_frame: u32,
+    compositor: Compositor,
+    /// Texture currently registered with egui's wgpu renderer. Replaced
+    /// every time the compositor produces a new output texture.
+    egui_texture: Option<TextureId>,
+}
+
+#[derive(Debug)]
+pub enum AppInitError {
+    NoWgpuRenderState,
+}
+
+impl std::fmt::Display for AppInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppInitError::NoWgpuRenderState => write!(
+                f,
+                "eframe did not provide a wgpu render state — was the wgpu \
+                 feature enabled and the wgpu renderer selected?"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AppInitError {}
+
+impl FelxApp {
+    pub fn new(cc: &CreationContext<'_>) -> Result<Self, AppInitError> {
+        let render_state = cc
+            .wgpu_render_state
+            .as_ref()
+            .ok_or(AppInitError::NoWgpuRenderState)?;
+        let renderer = build_renderer(render_state);
+        let compositor = Compositor::new(renderer);
+        let (project, comp_id) = default_project();
+        info!(comp = comp_id.0, "felx-app initialized");
+        Ok(Self {
+            project,
+            comp_id,
+            current_frame: 0,
+            compositor,
+            egui_texture: None,
+        })
+    }
+
+    fn ensure_frame_rendered(&mut self, render_state: &RenderState) {
+        if self.egui_texture.is_some() {
+            return;
+        }
+        let texture =
+            match self
+                .compositor
+                .render_cached(&self.project, self.comp_id, self.current_frame)
+            {
+                Ok(t) => t,
+                Err(CompositorError::NoVisibleLayer) => {
+                    // Empty playhead; show a placeholder later. For now leave
+                    // texture unset.
+                    return;
+                }
+                Err(e) => {
+                    error!(error = %e, "compositor render failed");
+                    return;
+                }
+            };
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = render_state.renderer.write();
+        let id =
+            renderer.register_native_texture(&render_state.device, &view, wgpu::FilterMode::Linear);
+        if let Some(old) = self.egui_texture.replace(id) {
+            renderer.free_texture(&old);
+        }
+    }
+
+    fn comp_aspect(&self) -> f32 {
+        let comp = self.project.composition(self.comp_id).expect("comp exists");
+        comp.width as f32 / comp.height as f32
+    }
+}
+
+impl App for FelxApp {
+    fn update(&mut self, ctx: &Context, frame: &mut Frame) {
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let render_state = render_state.clone();
+        self.ensure_frame_rendered(&render_state);
+
+        CentralPanel::default()
+            .frame(egui::Frame::default().fill(Color32::from_gray(15)))
+            .show(ctx, |ui| {
+                let avail = ui.available_size();
+                let aspect = self.comp_aspect();
+                let size = fit_aspect(avail, aspect);
+                let (rect, _resp) = ui.allocate_exact_size(size, Sense::hover());
+
+                if let Some(id) = self.egui_texture {
+                    let painter = ui.painter_at(rect);
+                    painter.image(
+                        id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new("(no frame)")
+                                .color(Color32::GRAY)
+                                .italics(),
+                        );
+                    });
+                }
+            });
+    }
+}
+
+fn build_renderer(render_state: &RenderState) -> Renderer {
+    let info = AdapterInfo::from(render_state.adapter.get_info());
+    Renderer::from_borrowed(
+        render_state.device.clone(),
+        render_state.queue.clone(),
+        info,
+    )
+}
+
+/// Default placeholder project until file-open lands. A 1280x720 / 30fps
+/// comp with a slate-blue solid layer.
+fn default_project() -> (Project, CompId) {
+    let mut project = Project::new();
+    let comp_id = project.add_composition("preview", 1280, 720);
+    let comp = project.composition_mut(comp_id).unwrap();
+    comp.duration_frames = 600;
+    comp.background = [0.0, 0.0, 0.0, 1.0];
+    let layer = comp.add_solid("background", [0.18, 0.22, 0.32, 1.0]);
+    comp.push_effect(layer, Effect::new("gain"));
+    (project, comp_id)
+}
+
+/// Largest box fitting `avail` while preserving `aspect` (= w/h).
+fn fit_aspect(avail: Vec2, aspect: f32) -> Vec2 {
+    if avail.x <= 0.0 || avail.y <= 0.0 || aspect <= 0.0 {
+        return Vec2::ZERO;
+    }
+    if avail.x / avail.y > aspect {
+        Vec2::new(avail.y * aspect, avail.y)
+    } else {
+        Vec2::new(avail.x, avail.x / aspect)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_aspect_handles_wider_avail() {
+        // avail wider than aspect → fit by height.
+        let s = fit_aspect(Vec2::new(800.0, 400.0), 1.0);
+        assert!((s.x - 400.0).abs() < 0.001);
+        assert!((s.y - 400.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fit_aspect_handles_taller_avail() {
+        // avail taller than aspect → fit by width.
+        let s = fit_aspect(Vec2::new(400.0, 800.0), 1.0);
+        assert!((s.x - 400.0).abs() < 0.001);
+        assert!((s.y - 400.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fit_aspect_widescreen_in_square_box() {
+        // 16:9 in a square: should be width-limited.
+        let s = fit_aspect(Vec2::new(800.0, 800.0), 16.0 / 9.0);
+        assert!((s.x - 800.0).abs() < 0.001);
+        assert!((s.y - 450.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fit_aspect_zero_inputs_return_zero() {
+        assert_eq!(fit_aspect(Vec2::ZERO, 1.0), Vec2::ZERO);
+        assert_eq!(fit_aspect(Vec2::new(100.0, 0.0), 1.0), Vec2::ZERO);
+        assert_eq!(fit_aspect(Vec2::new(100.0, 100.0), 0.0), Vec2::ZERO);
+    }
+}

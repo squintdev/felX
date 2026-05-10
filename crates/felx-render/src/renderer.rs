@@ -1,6 +1,9 @@
 //! wgpu device + queue ownership.
+//!
+//! `wgpu::Device` and `wgpu::Queue` are already reference-counted internally,
+//! so we hold them by value here; cloning is cheap and avoids a redundant
+//! `Arc<Arc<...>>` layer when interoperating with eframe.
 
-use std::sync::Arc;
 use tracing::info;
 
 #[derive(Clone, Debug)]
@@ -67,8 +70,8 @@ impl std::error::Error for RendererError {}
 /// Owns or borrows a wgpu device + queue.
 #[derive(Clone)]
 pub struct Renderer {
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     info: AdapterInfo,
 }
 
@@ -124,18 +127,16 @@ impl Renderer {
             .map_err(RendererError::DeviceRequest)?;
 
         Ok(Self {
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             info,
         })
     }
 
     /// Wrap a borrowed device + queue, e.g. from eframe's wgpu render state.
-    pub fn from_borrowed(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        info: AdapterInfo,
-    ) -> Self {
+    /// `wgpu::Device` and `wgpu::Queue` are cheap to clone (internally
+    /// reference-counted), so this takes them by value.
+    pub fn from_borrowed(device: wgpu::Device, queue: wgpu::Queue, info: AdapterInfo) -> Self {
         Self {
             device,
             queue,
@@ -149,14 +150,6 @@ impl Renderer {
 
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
-    }
-
-    pub fn device_arc(&self) -> Arc<wgpu::Device> {
-        Arc::clone(&self.device)
-    }
-
-    pub fn queue_arc(&self) -> Arc<wgpu::Queue> {
-        Arc::clone(&self.queue)
     }
 
     pub fn adapter_info(&self) -> &AdapterInfo {

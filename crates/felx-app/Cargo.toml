@@ -16,3 +16,6 @@ path = "src/main.rs"
 felx-core = { path = "../felx-core" }
 felx-render = { path = "../felx-render" }
 tracing = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+wgpu = { workspace = true }
