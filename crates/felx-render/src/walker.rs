@@ -135,6 +135,71 @@ pub fn render_full_comp_to_png_sequence(
     render_to_png_sequence(compositor, project, comp_id, range, &opts)
 }
 
+/// EXR sequence (F-105). Linear half-float OpenEXR via `image::codecs::openexr`.
+/// Each frame's RGBA8 is converted to RGBA32F (channel values in 0..1) and
+/// written to `output_dir/<filename_pattern>` per the same `{frame:NN}`
+/// substitution as the PNG path.
+pub fn render_to_exr_sequence(
+    compositor: &mut Compositor,
+    project: &Project,
+    comp_id: CompId,
+    range: Range<u32>,
+    opts: &ExrSequenceOptions,
+) -> Result<u32, WalkError> {
+    use image::Rgba;
+    let _comp = project
+        .composition(comp_id)
+        .ok_or(WalkError::UnknownComposition)?;
+    std::fs::create_dir_all(&opts.output_dir)?;
+    let mut written = 0u32;
+    for frame in range.clone() {
+        let _span = debug_span!("walker.exr_frame", frame).entered();
+        let texture = compositor.render_cached(project, comp_id, frame)?;
+        let rgba8 = download_image(compositor.renderer(), &texture);
+        let (w, h) = (rgba8.width(), rgba8.height());
+        let mut rgba32f: image::ImageBuffer<Rgba<f32>, Vec<f32>> = image::ImageBuffer::new(w, h);
+        for (x, y, p) in rgba8.enumerate_pixels() {
+            rgba32f.put_pixel(
+                x,
+                y,
+                Rgba([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                    p[3] as f32 / 255.0,
+                ]),
+            );
+        }
+        let filename = render_filename(&opts.filename_pattern, frame);
+        let path = opts.output_dir.join(filename);
+        rgba32f.save_with_format(&path, image::ImageFormat::OpenExr)?;
+        written += 1;
+    }
+    info!(
+        comp = comp_id.0,
+        first = range.start,
+        last = range.end,
+        written,
+        "exr render walker done"
+    );
+    Ok(written)
+}
+
+#[derive(Clone, Debug)]
+pub struct ExrSequenceOptions {
+    pub output_dir: PathBuf,
+    pub filename_pattern: String,
+}
+
+impl ExrSequenceOptions {
+    pub fn new(output_dir: impl Into<PathBuf>, filename_pattern: impl Into<String>) -> Self {
+        Self {
+            output_dir: output_dir.into(),
+            filename_pattern: filename_pattern.into(),
+        }
+    }
+}
+
 /// Helper used by the CLI render runner when a destination doesn't already
 /// exist as a directory.
 pub fn ensure_dir(path: &Path) -> std::io::Result<()> {

@@ -13,6 +13,7 @@ pub mod cpu_pass;
 pub mod effect_state;
 pub mod effects;
 pub mod frame_cache;
+pub mod gif_export;
 pub mod mask_pass;
 pub mod matte_pass;
 mod renderer;
