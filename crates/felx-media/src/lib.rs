@@ -10,6 +10,6 @@ pub mod info;
 pub use audio::{AudioInfo, CHANNELS, DEFAULT_SAMPLE_RATE, DecodedAudio, decode_file, probe_audio};
 pub use audio_export::{WavBitDepth, write_wav};
 pub use decode::{DecodedFrame, FfmpegDecoder, HwaccelKind, VideoDecoder, VideoFrameRgba};
-pub use encode::{EncodeOptions, H264Encoder};
+pub use encode::{EncodeOptions, H264Encoder, HwEncoder, RateControl, VideoCodec};
 pub use error::DecodeError;
 pub use info::{VideoInfo, probe};
