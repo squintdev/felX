@@ -14,3 +14,7 @@ tracing = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+felx-test = { path = "../felx-test" }

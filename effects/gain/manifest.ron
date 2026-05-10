@@ -1,0 +1,15 @@
+// Effect manifest. The full schema lands with F-019; this file documents the
+// intended shape now and serves as a fixture once the parameter system is in.
+(
+    id: "gain",
+    display_name: "Gain",
+    category: "Color",
+    working_space: "linear",
+    parameters: [
+        (
+            id: "gain",
+            display_name: "Gain",
+            kind: Float(default: 1.0, range: (min: 0.0, max: 4.0)),
+        ),
+    ],
+)
