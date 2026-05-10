@@ -11,7 +11,7 @@ use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
 use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
 use felx_core::model::{CompId, Effect, LayerId, Project};
-use felx_render::compositor::{Compositor, CompositorError};
+use felx_render::compositor::{Compositor, CompositorError, PreviewScale};
 use felx_render::effects::gain::Gain;
 use felx_render::texture_io::COMPOSITOR_FORMAT;
 use felx_render::{AdapterInfo, Renderer};
@@ -23,6 +23,7 @@ pub struct FelxApp {
     comp_id: CompId,
     playhead: Playhead,
     compositor: Compositor,
+    preview_scale: PreviewScale,
     selected_layer: Option<LayerId>,
     manifests: ManifestRegistry,
     /// Filesystem watcher for `effects/<id>/effect.wgsl`. None if the
@@ -92,6 +93,7 @@ impl FelxApp {
             comp_id,
             playhead,
             compositor,
+            preview_scale: PreviewScale::default(),
             selected_layer: None,
             manifests,
             hot_reload,
@@ -169,6 +171,10 @@ impl FelxApp {
                 }
                 TransportAction::Seek(f) => {
                     self.playhead.seek(f);
+                    moved = true;
+                }
+                TransportAction::SetPreviewScale(s) => {
+                    self.preview_scale = s;
                     moved = true;
                 }
             }
@@ -261,10 +267,12 @@ impl FelxApp {
             return;
         }
         let frame = self.playhead.current_frame();
-        let texture = match self
-            .compositor
-            .render_cached(&self.project, self.comp_id, frame)
-        {
+        let texture = match self.compositor.render_cached_at(
+            &self.project,
+            self.comp_id,
+            frame,
+            self.preview_scale,
+        ) {
             Ok(t) => t,
             Err(CompositorError::NoVisibleLayer) => {
                 // Empty playhead; show a placeholder later. For now leave
@@ -308,7 +316,9 @@ impl App for FelxApp {
         }
 
         let transport_actions = TopBottomPanel::bottom("transport")
-            .show(ctx, |ui| transport::show(ui, &self.playhead))
+            .show(ctx, |ui| {
+                transport::show(ui, &self.playhead, self.preview_scale)
+            })
             .inner;
         self.apply_transport_actions(transport_actions);
 

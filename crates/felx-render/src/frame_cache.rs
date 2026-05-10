@@ -17,14 +17,22 @@ pub struct CacheKey {
     pub comp_id: u32,
     pub frame: u32,
     pub stack_hash: u64,
+    /// Preview-scale denominator: 1 for full, 2 for half, 4 for quarter, etc.
+    /// Scale changes naturally invalidate cached frames at the previous scale.
+    pub scale_div: u8,
 }
 
 impl CacheKey {
     pub fn new(comp_id: u32, frame: u32, stack_hash: u64) -> Self {
+        Self::with_scale(comp_id, frame, stack_hash, 1)
+    }
+
+    pub fn with_scale(comp_id: u32, frame: u32, stack_hash: u64, scale_div: u8) -> Self {
         Self {
             comp_id,
             frame,
             stack_hash,
+            scale_div,
         }
     }
 }

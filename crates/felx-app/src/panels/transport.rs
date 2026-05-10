@@ -1,7 +1,8 @@
-//! Transport bar: play/pause, frame counter, scrubber.
+//! Transport bar: play/pause, frame counter, scrubber, preview-res combo.
 
 use crate::playback::Playhead;
 use egui::{Key, RichText, Ui};
+use felx_render::compositor::PreviewScale;
 
 #[derive(Clone, Debug)]
 pub enum TransportAction {
@@ -9,9 +10,10 @@ pub enum TransportAction {
     StepForward,
     StepBackward,
     Seek(u32),
+    SetPreviewScale(PreviewScale),
 }
 
-pub fn show(ui: &mut Ui, playhead: &Playhead) -> Vec<TransportAction> {
+pub fn show(ui: &mut Ui, playhead: &Playhead, scale: PreviewScale) -> Vec<TransportAction> {
     let mut actions = Vec::new();
     let max = playhead.duration_frames().saturating_sub(1);
 
@@ -39,6 +41,18 @@ pub fn show(ui: &mut Ui, playhead: &Playhead) -> Vec<TransportAction> {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::ComboBox::from_id_salt("preview-scale")
+                .selected_text(scale.label())
+                .show_ui(ui, |ui| {
+                    for opt in PreviewScale::ALL {
+                        if ui.selectable_label(opt == scale, opt.label()).clicked() && opt != scale
+                        {
+                            actions.push(TransportAction::SetPreviewScale(opt));
+                        }
+                    }
+                });
+            ui.label(RichText::new("res").italics());
+            ui.separator();
             ui.label(
                 RichText::new(format!(
                     "{:>5} / {:<5}  @ {:.2} fps",
@@ -51,8 +65,7 @@ pub fn show(ui: &mut Ui, playhead: &Playhead) -> Vec<TransportAction> {
         });
     });
 
-    // Keyboard shortcuts. Read from the egui context (the same ctx is
-    // available via ui.ctx()).
+    // Keyboard shortcuts.
     let ctx = ui.ctx();
     ctx.input(|i| {
         if i.key_pressed(Key::Space) {

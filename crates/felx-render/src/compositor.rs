@@ -9,8 +9,52 @@ use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::{Renderer, RendererError};
 use felx_core::model::{CompId, Effect, Layer, LayerKind, Project};
-use image::{ImageBuffer, Rgba, RgbaImage};
+use image::{ImageBuffer, Rgba, RgbaImage, imageops};
 use tracing::{debug, debug_span, info_span, warn};
+
+/// Preview-resolution scale factor. Renders at `comp_dims / scale_div` in
+/// each axis. The cache keys frames per scale, so toggling Half ↔ Full
+/// reuses both populations on the next swap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviewScale {
+    Full,
+    #[default]
+    Half,
+    Quarter,
+    Eighth,
+}
+
+impl PreviewScale {
+    pub fn divisor(self) -> u8 {
+        match self {
+            PreviewScale::Full => 1,
+            PreviewScale::Half => 2,
+            PreviewScale::Quarter => 4,
+            PreviewScale::Eighth => 8,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewScale::Full => "Full",
+            PreviewScale::Half => "Half",
+            PreviewScale::Quarter => "Quarter",
+            PreviewScale::Eighth => "Eighth",
+        }
+    }
+
+    pub const ALL: [PreviewScale; 4] = [
+        PreviewScale::Full,
+        PreviewScale::Half,
+        PreviewScale::Quarter,
+        PreviewScale::Eighth,
+    ];
+
+    pub fn scale_dims(self, w: u32, h: u32) -> (u32, u32) {
+        let d = self.divisor() as u32;
+        ((w / d).max(1), (h / d).max(1))
+    }
+}
 
 #[derive(Debug)]
 pub enum CompositorError {
@@ -152,13 +196,24 @@ impl Compositor {
     }
 
     /// Render through the cache: returns a cached texture if available,
-    /// otherwise renders and inserts.
+    /// otherwise renders and inserts. Equivalent to
+    /// `render_cached_at(_, PreviewScale::Full)`.
     pub fn render_cached(
         &mut self,
         project: &Project,
         comp_id: CompId,
         frame: u32,
     ) -> Result<wgpu::Texture, CompositorError> {
+        self.render_cached_at(project, comp_id, frame, PreviewScale::Full)
+    }
+
+    pub fn render_cached_at(
+        &mut self,
+        project: &Project,
+        comp_id: CompId,
+        frame: u32,
+        scale: PreviewScale,
+    ) -> Result<wgpu::Texture, CompositorError> {
         let comp = project
             .composition(comp_id)
             .ok_or(CompositorError::UnknownComposition)?;
@@ -167,30 +222,46 @@ impl Compositor {
             .iter()
             .find(|l| frame >= l.in_frame && frame < l.out_frame)
             .ok_or(CompositorError::NoVisibleLayer)?;
-        let key = Self::cache_key(comp_id, frame, layer);
+        let key = Self::cache_key(comp_id, frame, layer, scale);
         if let Some(tex) = self.cache.get(key) {
             return Ok(tex);
         }
-        let tex = self.render(project, comp_id, frame)?;
+        let tex = self.render_at(project, comp_id, frame, scale)?;
         self.cache.insert(key, tex.clone());
         Ok(tex)
     }
 
-    fn cache_key(comp_id: CompId, frame: u32, layer: &Layer) -> CacheKey {
+    fn cache_key(comp_id: CompId, frame: u32, layer: &Layer, scale: PreviewScale) -> CacheKey {
         let stack_hash = hash_effect_stack(layer.effects.iter());
-        CacheKey::new(comp_id.0, frame, stack_hash)
+        CacheKey::with_scale(comp_id.0, frame, stack_hash, scale.divisor())
     }
 
     /// Render the first layer of the named composition that's visible at
     /// `frame`, applying its effect stack. The output texture is owned by
-    /// the caller (not pooled).
+    /// the caller (not pooled). Renders at full resolution.
     pub fn render(
         &mut self,
         project: &Project,
         comp_id: CompId,
         frame: u32,
     ) -> Result<wgpu::Texture, CompositorError> {
-        let _span = info_span!("compositor.render", frame, comp = comp_id.0).entered();
+        self.render_at(project, comp_id, frame, PreviewScale::Full)
+    }
+
+    pub fn render_at(
+        &mut self,
+        project: &Project,
+        comp_id: CompId,
+        frame: u32,
+        scale: PreviewScale,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let _span = info_span!(
+            "compositor.render",
+            frame,
+            comp = comp_id.0,
+            scale = scale.label()
+        )
+        .entered();
 
         let comp = project
             .composition(comp_id)
@@ -201,9 +272,11 @@ impl Compositor {
             .find(|l| frame >= l.in_frame && frame < l.out_frame)
             .ok_or(CompositorError::NoVisibleLayer)?;
 
+        let (rw, rh) = scale.scale_dims(comp.width, comp.height);
+
         let source_image = {
             let _s = debug_span!("compositor.resolve_source").entered();
-            self.resolve_layer_source(project, &layer.kind, comp.width, comp.height)?
+            self.resolve_layer_source(project, &layer.kind, rw, rh)?
         };
         let mut current_tex = upload_image(&self.renderer, &source_image);
 
@@ -211,7 +284,7 @@ impl Compositor {
             if !eff.enabled {
                 continue;
             }
-            current_tex = self.apply_effect(eff, current_tex, comp.width, comp.height)?;
+            current_tex = self.apply_effect(eff, current_tex, rw, rh)?;
         }
 
         Ok(current_tex)
@@ -273,7 +346,11 @@ impl Compositor {
             LayerKind::Image { asset } => {
                 let a = project.asset(*asset).ok_or(CompositorError::UnknownAsset)?;
                 let img = image::open(&a.path).map_err(CompositorError::AssetDecode)?;
-                Ok(img.to_rgba8())
+                let mut rgba = img.to_rgba8();
+                if rgba.width() != comp_w || rgba.height() != comp_h {
+                    rgba = imageops::resize(&rgba, comp_w, comp_h, imageops::FilterType::Triangle);
+                }
+                Ok(rgba)
             }
             LayerKind::Solid { color } => {
                 let r = (color[0].clamp(0.0, 1.0) * 255.0).round() as u8;
