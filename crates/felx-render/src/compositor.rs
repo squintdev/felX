@@ -6,6 +6,7 @@ use crate::blend_pass::{BlendParams, BlendPass};
 use crate::clear_pass::clear_to;
 use crate::cpu_pass::run_cpu_pass;
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
+use crate::effects::crt::{self, Crt, CrtParams};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::effects::squint_diffusion::{self, DiffusionParams};
@@ -164,6 +165,7 @@ pub struct Compositor {
     gain: Gain,
     cc_toner: CcToner,
     signal: Signal,
+    crt: Crt,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
     blend_pass: BlendPass,
@@ -181,6 +183,7 @@ impl Compositor {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
         let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
+        let crt = Crt::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
@@ -190,6 +193,7 @@ impl Compositor {
             gain,
             cc_toner,
             signal,
+            crt,
             srgb_wrap,
             transform_pass,
             blend_pass,
@@ -577,11 +581,62 @@ impl Compositor {
                 self.pool.release(input);
                 Ok(output)
             }
+            "crt" => self.apply_crt(eff, input, w, h),
             other => {
                 warn!(effect_id = other, "skipping unknown effect");
                 Ok(input)
             }
         }
+    }
+
+    fn apply_crt(
+        &mut self,
+        eff: &Effect,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let curvature_x = eff.values.float("curvature_x").unwrap_or(0.06);
+        let curvature_y = eff.values.float("curvature_y").unwrap_or(0.08);
+        let scanline_intensity = eff.values.float("scanline_intensity").unwrap_or(0.4);
+        let scanline_thickness = eff.values.float("scanline_thickness").unwrap_or(0.5);
+        let mask_intensity = eff.values.float("mask_intensity").unwrap_or(0.5);
+        let mask_size = eff.values.float("mask_size").unwrap_or(3.0);
+        let mask_id = eff
+            .values
+            .enum_str("mask_type")
+            .unwrap_or("aperture_grille");
+        let convergence_radial = eff.values.float("convergence_radial").unwrap_or(1.5);
+        let vignette_intensity = eff.values.float("vignette_intensity").unwrap_or(0.4);
+        let vignette_softness = eff.values.float("vignette_softness").unwrap_or(0.4);
+
+        let params = CrtParams::new(
+            [curvature_x, curvature_y],
+            scanline_intensity,
+            scanline_thickness,
+            mask_intensity,
+            mask_size,
+            crt::mask_index(mask_id),
+            convergence_radial,
+            vignette_intensity,
+            vignette_softness,
+            [w as f32, h as f32],
+        );
+
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.crt"),
+                });
+        self.crt
+            .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        Ok(output)
     }
 
     fn apply_signal(

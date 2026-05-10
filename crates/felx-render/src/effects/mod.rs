@@ -3,6 +3,7 @@
 //! pipeline and bind-group plumbing. CPU-pass effects are pure Rust.
 
 pub mod cc_toner;
+pub mod crt;
 pub mod gain;
 pub mod invert;
 pub mod squint_diffusion;

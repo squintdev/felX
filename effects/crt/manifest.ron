@@ -1,0 +1,39 @@
+// CRT — combined display simulation. v1 ships as one effect with all the
+// sub-features toggleable; F-073…F-079 split into atomic chainable passes
+// in a follow-up.
+(
+    id: "crt",
+    display_name: "CRT",
+    category: "Stylize",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (id: "curvature_x", display_name: "Curvature X",
+         kind: Float(default: 0.06, range: (min: 0.0, max: 0.5))),
+        (id: "curvature_y", display_name: "Curvature Y",
+         kind: Float(default: 0.08, range: (min: 0.0, max: 0.5))),
+        (id: "scanline_intensity", display_name: "Scanline Intensity",
+         kind: Float(default: 0.4, range: (min: 0.0, max: 1.0))),
+        (id: "scanline_thickness", display_name: "Scanline Thickness",
+         kind: Float(default: 0.5, range: (min: 0.05, max: 4.0))),
+        (id: "mask_intensity", display_name: "Mask Intensity",
+         kind: Float(default: 0.5, range: (min: 0.0, max: 1.0))),
+        (id: "mask_size", display_name: "Mask Size (px)",
+         kind: Float(default: 3.0, range: (min: 1.0, max: 12.0))),
+        (id: "mask_type", display_name: "Mask Type",
+         kind: Enum(
+             variants: [
+                 (id: "dot_trio", display_name: "Dot Trio"),
+                 (id: "aperture_grille", display_name: "Aperture Grille"),
+                 (id: "slot_mask", display_name: "Slot Mask"),
+             ],
+             default: "aperture_grille",
+         )),
+        (id: "convergence_radial", display_name: "Convergence",
+         kind: Float(default: 1.5, range: (min: 0.0, max: 10.0))),
+        (id: "vignette_intensity", display_name: "Vignette Intensity",
+         kind: Float(default: 0.4, range: (min: 0.0, max: 1.0))),
+        (id: "vignette_softness", display_name: "Vignette Softness",
+         kind: Float(default: 0.4, range: (min: 0.0, max: 1.0))),
+    ],
+)
