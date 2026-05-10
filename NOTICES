@@ -10,15 +10,28 @@ License, Version 2.0. See LICENSE-MIT and LICENSE-APACHE.
 
 ----------------------------------------------------------------------------
 
-Format
+ffmpeg-the-third
+----------------
+
+URL:     https://github.com/shssoichiro/ffmpeg-the-third
+License: WTFPL (Do What The Fuck You Want To Public License)
+
+ffmpeg-the-third is a Rust binding for FFmpeg, used by analog-felx for
+video decode, encode, and probing. It is a fork of the rust-ffmpeg crate
+that tracks recent FFmpeg upstream more aggressively.
+
+FFmpeg
 ------
 
-For each entry: project name, license, the upstream copyright/author notice
-verbatim, and the project URL.
+URL:     https://ffmpeg.org/
+License: LGPL-2.1+ (the build configuration we link against, with `--enable-gpl`
+         not specified). Some optional libraries used by FFmpeg are GPL-2+;
+         we ship LGPL-only builds in our installers.
 
-----------------------------------------------------------------------------
+analog-felx links to FFmpeg's libraries (libavcodec, libavformat,
+libavutil, libavfilter, libswscale, libswresample) at runtime. The
+installer for each platform bundles those shared libraries; users may
+also use a system-installed FFmpeg.
 
-Entries
--------
-
-(none yet — this file is populated as dependencies and references are added.)
+FFmpeg includes contributions from many authors and is governed by the
+copyright notices in its source distribution.
