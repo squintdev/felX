@@ -11,5 +11,6 @@ pub mod effects;
 pub mod frame_cache;
 mod renderer;
 pub mod texture_io;
+pub mod walker;
 
 pub use renderer::*;
