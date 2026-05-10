@@ -17,6 +17,7 @@ mod manifests;
 mod panels;
 mod playback;
 mod presets;
+mod render_queue;
 
 use app::FelxApp;
 use eframe::NativeOptions;
