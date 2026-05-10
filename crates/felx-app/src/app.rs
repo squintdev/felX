@@ -58,6 +58,9 @@ pub struct FelxApp {
     /// viewer drops corner anchors; clicking near the first one closes the
     /// path and creates a new mask on the selected layer.
     pen: PenState,
+    /// Help window: which effect's README is currently displayed (None =
+    /// help window closed).
+    help_open_for: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,6 +150,7 @@ impl FelxApp {
             render_region: None,
             region_drag_anchor: None,
             pen: PenState::default(),
+            help_open_for: None,
         })
     }
 
@@ -527,8 +531,9 @@ impl App for FelxApp {
             self.render_dirty = true;
         }
 
-        // Top menu strip: preset selector.
+        // Top menu strip: preset selector + help.
         let mut chosen_preset: Option<usize> = None;
+        let mut chosen_help: Option<String> = None;
         TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Presets:");
@@ -537,10 +542,45 @@ impl App for FelxApp {
                         chosen_preset = Some(i);
                     }
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("Help", |ui| {
+                        ui.label(egui::RichText::new("Effect docs").strong());
+                        ui.separator();
+                        for id in EFFECT_DOC_IDS {
+                            if ui.button(*id).clicked() {
+                                chosen_help = Some((*id).to_string());
+                                ui.close();
+                            }
+                        }
+                    });
+                });
             });
         });
         if let Some(i) = chosen_preset {
             self.apply_preset(i);
+        }
+        if let Some(id) = chosen_help {
+            self.help_open_for = Some(id);
+        }
+
+        // Help window: load the effect's README on demand.
+        if let Some(id) = self.help_open_for.clone() {
+            let mut still_open = true;
+            egui::Window::new(format!("Help — {id}"))
+                .open(&mut still_open)
+                .resizable(true)
+                .default_size([500.0, 400.0])
+                .show(ctx, |ui| {
+                    let path = effects_root_dir().join(&id).join("README.md");
+                    let body = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| format!("(could not read {}: {e})", path.display()));
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(egui::RichText::new(body).monospace());
+                    });
+                });
+            if !still_open {
+                self.help_open_for = None;
+            }
         }
 
         let transport_actions = TopBottomPanel::bottom("transport")
@@ -814,6 +854,20 @@ impl App for FelxApp {
             });
     }
 }
+
+/// Effect IDs whose README.md is shown in the Help menu (F-090). Update
+/// when adding new effects.
+const EFFECT_DOC_IDS: &[&str] = &[
+    "gain",
+    "invert",
+    "cc_toner",
+    "signal",
+    "squint_diffusion",
+    "crt",
+    "vhs",
+    "crt_persistence",
+    "bloom",
+];
 
 /// Locate the workspace `effects/` directory. CARGO_MANIFEST_DIR points at
 /// `crates/felx-app/`; the effects live two levels up.
