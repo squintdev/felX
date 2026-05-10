@@ -2,6 +2,8 @@
 //! layer stacks with blending modes and track mattes; here we render the
 //! first visible layer's source through its effect stack.
 
+use crate::blend_pass::{BlendParams, BlendPass};
+use crate::clear_pass::clear_to;
 use crate::cpu_pass::run_cpu_pass;
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::gain::{Gain, GainParams};
@@ -160,6 +162,7 @@ pub struct Compositor {
     cc_toner: CcToner,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
+    blend_pass: BlendPass,
     pool: TexturePool,
     cache: FrameCache,
 }
@@ -174,12 +177,14 @@ impl Compositor {
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
+        let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
             cc_toner,
             srgb_wrap,
             transform_pass,
+            blend_pass,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
         }
@@ -229,12 +234,15 @@ impl Compositor {
         let comp = project
             .composition(comp_id)
             .ok_or(CompositorError::UnknownComposition)?;
-        let layer = comp
+        let visible: Vec<&Layer> = comp
             .layers
             .iter()
-            .find(|l| frame >= l.in_frame && frame < l.out_frame)
-            .ok_or(CompositorError::NoVisibleLayer)?;
-        let key = Self::cache_key(comp_id, frame, layer, scale);
+            .filter(|l| frame >= l.in_frame && frame < l.out_frame)
+            .collect();
+        if visible.is_empty() {
+            return Err(CompositorError::NoVisibleLayer);
+        }
+        let key = Self::cache_key_multilayer(comp_id, frame, &visible, scale);
         if let Some(tex) = self.cache.get(key) {
             return Ok(tex);
         }
@@ -243,8 +251,14 @@ impl Compositor {
         Ok(tex)
     }
 
-    fn cache_key(comp_id: CompId, frame: u32, layer: &Layer, scale: PreviewScale) -> CacheKey {
-        let stack_hash = hash_effect_stack(layer.effects.iter());
+    fn cache_key_multilayer(
+        comp_id: CompId,
+        frame: u32,
+        layers: &[&Layer],
+        scale: PreviewScale,
+    ) -> CacheKey {
+        // Hash every visible layer's effect stack into a single key.
+        let stack_hash = hash_effect_stack(layers.iter().flat_map(|l| l.effects.iter()));
         CacheKey::with_scale(comp_id.0, frame, stack_hash, scale.divisor())
     }
 
@@ -278,16 +292,50 @@ impl Compositor {
         let comp = project
             .composition(comp_id)
             .ok_or(CompositorError::UnknownComposition)?;
-        let layer = comp
+
+        let visible: Vec<&Layer> = comp
             .layers
             .iter()
-            .find(|l| frame >= l.in_frame && frame < l.out_frame)
-            .ok_or(CompositorError::NoVisibleLayer)?;
+            .filter(|l| frame >= l.in_frame && frame < l.out_frame)
+            .collect();
+        if visible.is_empty() {
+            return Err(CompositorError::NoVisibleLayer);
+        }
 
         let (rw, rh) = scale.scale_dims(comp.width, comp.height);
 
+        // Initialize accumulator with the comp's background color via a
+        // clear-to-color pass on a pool-acquired texture so subsequent
+        // frames at the same dims reuse the underlying allocation.
+        let mut accumulator = self.pool.acquire(&self.renderer, rw, rh, COMPOSITOR_FORMAT);
+        clear_to(
+            &self.renderer,
+            &accumulator.create_view(&wgpu::TextureViewDescriptor::default()),
+            comp.background,
+        );
+
+        for layer in visible {
+            let layer_tex =
+                self.render_layer(project, layer, comp.background, scale, rw, rh, frame)?;
+            accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0);
+        }
+
+        Ok(accumulator)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_layer(
+        &mut self,
+        project: &Project,
+        layer: &Layer,
+        comp_background: [f32; 4],
+        scale: PreviewScale,
+        rw: u32,
+        rh: u32,
+        frame: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
         let source_image = {
-            let _s = debug_span!("compositor.resolve_source").entered();
+            let _s = debug_span!("compositor.resolve_source", layer = layer.id.0).entered();
             self.resolve_layer_source(project, &layer.kind, rw, rh)?
         };
         let mut current_tex = upload_image(&self.renderer, &source_image);
@@ -299,19 +347,53 @@ impl Compositor {
             current_tex = self.apply_effect(eff, current_tex, rw, rh)?;
         }
 
-        // Apply the layer's transform onto the comp canvas. v1 treats the
-        // post-effects texture as covering the comp at scale 1.0; F-040
-        // generalizes to multi-layer compositing.
+        // Background for the per-layer transform pass is transparent so the
+        // accumulator behind it shows through. The compositor's BG color
+        // only fills the initial accumulator above.
+        let transparent: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+        let _ = comp_background;
         let transformed = self.apply_transform(
             &layer.transform,
             current_tex,
-            comp.background,
+            transparent,
             scale,
             rw,
             rh,
             frame,
         );
         Ok(transformed)
+    }
+
+    fn blend_layer_onto(
+        &mut self,
+        accumulator: wgpu::Texture,
+        layer: wgpu::Texture,
+        rw: u32,
+        rh: u32,
+        opacity: f32,
+    ) -> wgpu::Texture {
+        let output = self.pool.acquire(&self.renderer, rw, rh, COMPOSITOR_FORMAT);
+        let acc_view = accumulator.create_view(&wgpu::TextureViewDescriptor::default());
+        let layer_view = layer.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.blend"),
+                });
+        self.blend_pass.render(
+            &self.renderer,
+            &mut cmd,
+            &acc_view,
+            &layer_view,
+            &out_view,
+            BlendParams::normal(opacity),
+        );
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(accumulator);
+        self.pool.release(layer);
+        output
     }
 
     #[allow(clippy::too_many_arguments)]

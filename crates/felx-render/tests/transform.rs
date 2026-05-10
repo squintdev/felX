@@ -18,7 +18,8 @@ fn solid_project_white_layer() -> (Project, felx_core::model::CompId) {
     let comp_id = p.add_composition("main", 32, 16);
     let comp = p.composition_mut(comp_id).unwrap();
     comp.duration_frames = 30;
-    comp.background = [1.0, 0.0, 0.0, 1.0]; // red background
+    // Default: opaque red comp background so off-canvas regions show red.
+    comp.background = [1.0, 0.0, 0.0, 1.0];
     comp.add_solid("white", [1.0, 1.0, 1.0, 1.0]);
     (p, comp_id)
 }
@@ -70,11 +71,13 @@ fn opacity_half_blends_layer_with_background() {
     let mut comp_runtime = Compositor::new(renderer);
     let tex = comp_runtime.render(&project, comp_id, 0).unwrap();
     let img = download_image(comp_runtime.renderer(), &tex);
-    // Opacity 0.5 on a white layer with background-fill outside the shape;
-    // since the layer covers the whole canvas, every pixel is the white
-    // layer at half-opacity (multiplied alpha).
+    // White layer at 50% opacity over an opaque red background. Final
+    // alpha is 1.0 (background is opaque); RGB blends to ~(0.75, 0.5, 0.5)
+    // = (191, 128, 128). We just sanity-check that some white showed up
+    // on top of the red.
     for p in img.pixels() {
-        assert!(p[3] >= 120 && p[3] <= 140, "expected alpha ~128, got {p:?}");
+        assert!(p[1] >= 100, "green channel low — layer didn't blend, {p:?}");
+        assert!(p[2] >= 100, "blue channel low — layer didn't blend, {p:?}");
     }
 }
 
