@@ -1,0 +1,53 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock IS committed — analog-felx is an application, not a library.
+
+# Editor / IDE
+.idea/
+.claude/
+.vscode/
+.helix/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Test / coverage
+*.profraw
+*.profdata
+/coverage/
+/target/visual-diffs/
+
+# Project-specific (from the planned auto-save format, F-113)
+*.felx.autosave
+
+# Planning docs (kept local, not committed)
+PRD.md
+effects.md
+felx-mvp-epic.md
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Claude Code (project-local user-specific config)
+.claude/settings.local.json
+
+# Tool-managed plugin artifacts (Claude Code Blender Toolkit plugin)
+.blender-toolkit/
+
+# Node (in case any build tooling pulls npm)
+node_modules/
