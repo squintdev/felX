@@ -10,6 +10,7 @@ use felx_core::model::{Composition, LayerId, LayerKind};
 pub enum LayerAction {
     Select(Option<LayerId>),
     AddSolid,
+    AddAdjustment,
     Delete(LayerId),
     MoveUp(LayerId),
     MoveDown(LayerId),
@@ -23,6 +24,13 @@ pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<L
     ui.horizontal(|ui| {
         ui.heading("Layers");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button("+ Adj")
+                .on_hover_text("Add Adjustment layer")
+                .clicked()
+            {
+                actions.push(LayerAction::AddAdjustment);
+            }
             if ui.button("+ Solid").clicked() {
                 actions.push(LayerAction::AddSolid);
             }

@@ -374,10 +374,25 @@ impl Compositor {
         );
 
         let framerate = comp.framerate;
+        let time = felx_core::model::Frame(frame).to_time(framerate);
         for (idx, layer) in visible.iter().enumerate() {
             if matte_source_indices.contains(&idx) {
                 continue;
             }
+
+            // Adjustment layer (F-060): apply its effect stack to the
+            // accumulator (the flattened layers below) and replace the
+            // accumulator with the result. No per-layer source pixels of
+            // its own, no blend onto the accumulator beyond the effect's
+            // pass-through. Track-matte interaction with adjustment layers
+            // is unusual and explicitly out of scope for v1.
+            if matches!(layer.kind, LayerKind::Adjustment) {
+                if !layer.effects.is_empty() {
+                    accumulator = self.apply_effect_stack(layer, accumulator, rw, rh, time)?;
+                }
+                continue;
+            }
+
             let mut layer_tex = self.render_layer(
                 project,
                 layer,
@@ -857,6 +872,32 @@ impl Compositor {
         self.pool.release(encoded);
         self.pool.release(toned);
         Ok(decoded)
+    }
+
+    /// Apply a layer's effect stack to an arbitrary input texture and
+    /// return the resulting texture. Used by adjustment layers (F-060) so
+    /// the same effect dispatch path runs against the comp accumulator.
+    fn apply_effect_stack(
+        &mut self,
+        layer: &Layer,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+        time: felx_core::model::Rational,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let mut current = input;
+        for eff in &layer.effects {
+            if !eff.enabled {
+                continue;
+            }
+            let resolved = Effect {
+                id: eff.id.clone(),
+                enabled: eff.enabled,
+                values: eff.values.resolved_at(time),
+            };
+            current = self.apply_effect(&resolved, current, w, h)?;
+        }
+        Ok(current)
     }
 
     /// CPU-readback resize. Used by the pre-comp path to fit the inner

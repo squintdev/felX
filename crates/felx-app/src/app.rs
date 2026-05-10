@@ -309,6 +309,18 @@ impl FelxApp {
                         self.selected_layer = Some(id);
                     }
                 }
+                LayerAction::AddAdjustment => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        let dur = comp.duration_frames;
+                        let id = comp.add_layer(
+                            "Adjustment",
+                            felx_core::model::LayerKind::Adjustment,
+                            0,
+                            dur,
+                        );
+                        self.selected_layer = Some(id);
+                    }
+                }
                 LayerAction::Delete(id) => {
                     if let Some(comp) = self.project.composition_mut(self.comp_id) {
                         comp.remove_layer(id);
