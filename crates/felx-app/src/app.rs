@@ -4,6 +4,7 @@
 use crate::hot_reload::{HotReloadEvent, HotReloadWatcher};
 use crate::manifests::ManifestRegistry;
 use crate::panels::effects::{self, EffectsAction};
+use crate::panels::graph_editor;
 use crate::panels::layers::{self, LayerAction};
 use crate::panels::transport::{self, TransportAction};
 use crate::playback::Playhead;
@@ -41,6 +42,9 @@ pub struct FelxApp {
     /// edit, scrub, playback advance, hot-reload). Cleared by
     /// [`ensure_frame_rendered`].
     render_dirty: bool,
+    /// Graph editor visibility. Off by default to avoid eating screen real
+    /// estate before the user has any animated parameters.
+    graph_editor_open: bool,
 }
 
 #[derive(Debug)]
@@ -104,6 +108,7 @@ impl FelxApp {
             shader_error: None,
             egui_texture: None,
             render_dirty: true,
+            graph_editor_open: false,
         })
     }
 
@@ -180,6 +185,9 @@ impl FelxApp {
                 TransportAction::SetPreviewScale(s) => {
                     self.preview_scale = s;
                     moved = true;
+                }
+                TransportAction::ToggleGraphEditor => {
+                    self.graph_editor_open = !self.graph_editor_open;
                 }
             }
         }
@@ -366,10 +374,41 @@ impl App for FelxApp {
 
         let transport_actions = TopBottomPanel::bottom("transport")
             .show(ctx, |ui| {
-                transport::show(ui, &self.playhead, self.preview_scale)
+                transport::show(
+                    ui,
+                    &self.playhead,
+                    self.preview_scale,
+                    self.graph_editor_open,
+                )
             })
             .inner;
         self.apply_transport_actions(transport_actions);
+
+        if self.graph_editor_open {
+            let comp_for_graph = self.project.composition(self.comp_id).expect("comp exists");
+            let duration_secs =
+                comp_for_graph.duration_frames as f64 / comp_for_graph.framerate.as_fps();
+            let graph_time =
+                FelxFrame(self.playhead.current_frame()).to_time(comp_for_graph.framerate);
+            let selected_layer = self
+                .selected_layer
+                .and_then(|id| comp_for_graph.layers.iter().find(|l| l.id == id));
+            let graph_actions = TopBottomPanel::bottom("graph_editor")
+                .resizable(true)
+                .default_height(220.0)
+                .min_height(120.0)
+                .show(ctx, |ui| {
+                    graph_editor::show(
+                        ui,
+                        selected_layer,
+                        &self.manifests,
+                        graph_time,
+                        duration_secs,
+                    )
+                })
+                .inner;
+            self.apply_effects_actions(graph_actions);
+        }
 
         let layer_actions = SidePanel::left("layers")
             .resizable(true)

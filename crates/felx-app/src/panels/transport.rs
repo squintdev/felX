@@ -11,9 +11,15 @@ pub enum TransportAction {
     StepBackward,
     Seek(u32),
     SetPreviewScale(PreviewScale),
+    ToggleGraphEditor,
 }
 
-pub fn show(ui: &mut Ui, playhead: &Playhead, scale: PreviewScale) -> Vec<TransportAction> {
+pub fn show(
+    ui: &mut Ui,
+    playhead: &Playhead,
+    scale: PreviewScale,
+    graph_open: bool,
+) -> Vec<TransportAction> {
     let mut actions = Vec::new();
     let max = playhead.duration_frames().saturating_sub(1);
 
@@ -31,6 +37,15 @@ pub fn show(ui: &mut Ui, playhead: &Playhead, scale: PreviewScale) -> Vec<Transp
         }
         if ui.button("▶").on_hover_text("Step forward").clicked() {
             actions.push(TransportAction::StepForward);
+        }
+        ui.separator();
+        let graph_label = if graph_open { "▼ Graph" } else { "▲ Graph" };
+        if ui
+            .button(graph_label)
+            .on_hover_text("Toggle the keyframe graph editor")
+            .clicked()
+        {
+            actions.push(TransportAction::ToggleGraphEditor);
         }
         ui.separator();
 
