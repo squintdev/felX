@@ -21,6 +21,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 ron = "0.10"
+wgpu = "25"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = "thin"

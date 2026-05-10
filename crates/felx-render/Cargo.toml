@@ -10,3 +10,7 @@ publish = false
 
 [dependencies]
 felx-core = { path = "../felx-core" }
+tracing = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
