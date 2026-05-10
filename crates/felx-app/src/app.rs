@@ -11,7 +11,7 @@ use crate::presets::PresetRegistry;
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
 use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
-use felx_core::model::{CompId, Effect, LayerId, Project};
+use felx_core::model::{CompId, Effect, Frame as FelxFrame, LayerId, Project};
 use felx_render::compositor::{Compositor, CompositorError, PreviewScale};
 use felx_render::effects::gain::Gain;
 use felx_render::texture_io::COMPOSITOR_FORMAT;
@@ -391,7 +391,8 @@ impl App for FelxApp {
                 let selected_layer = self
                     .selected_layer
                     .and_then(|id| comp.layers.iter().find(|l| l.id == id));
-                effects::show(ui, &self.manifests, selected_layer)
+                let time = FelxFrame(self.playhead.current_frame()).to_time(comp.framerate);
+                effects::show(ui, &self.manifests, selected_layer, time)
             })
             .inner;
         self.apply_effects_actions(effects_actions);

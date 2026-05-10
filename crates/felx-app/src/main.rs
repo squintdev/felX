@@ -8,6 +8,7 @@
 //! F-026 wires up the parameter panels.
 
 mod app;
+mod curve_widget;
 mod hot_reload;
 mod manifests;
 mod panels;

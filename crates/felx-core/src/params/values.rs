@@ -4,6 +4,7 @@
 //! declared default. Mutated as the user edits sliders / colors / etc.
 //! Persisted with the project so reopening restores the dialed-in look.
 
+use crate::model::{Curve, Rational};
 use crate::params::{EffectManifest, EnumVariant, ParamDecl, ParamKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -11,6 +12,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParamValue {
     Float(f32),
+    /// Animated float — sampled at the playhead time. Resolves to a
+    /// [`ParamValue::Float`] inside [`ParamValues::resolved_at`] before
+    /// reaching effect code.
+    FloatCurve(Curve<f32>),
     Int(i32),
     Bool(bool),
     Color([f32; 4]),
@@ -24,6 +29,22 @@ impl ParamValue {
     pub fn as_float(&self) -> Option<f32> {
         if let ParamValue::Float(v) = self {
             Some(*v)
+        } else {
+            None
+        }
+    }
+    /// Sample a float-typed value (static or animated) at `time`. Returns
+    /// `None` for non-float kinds.
+    pub fn as_float_at(&self, time: Rational) -> Option<f32> {
+        match self {
+            ParamValue::Float(v) => Some(*v),
+            ParamValue::FloatCurve(c) => Some(c.sample_at_time(time)),
+            _ => None,
+        }
+    }
+    pub fn as_float_curve(&self) -> Option<&Curve<f32>> {
+        if let ParamValue::FloatCurve(c) = self {
+            Some(c)
         } else {
             None
         }
@@ -113,9 +134,36 @@ impl ParamValues {
         self.values.is_empty()
     }
 
+    /// Snapshot all animated values at `time`, returning a copy where every
+    /// [`ParamValue::FloatCurve`] entry has been resolved to a static
+    /// [`ParamValue::Float`]. Other entries are unchanged. Effect code
+    /// reads from the resolved view so it never has to know whether a
+    /// parameter was animated.
+    pub fn resolved_at(&self, time: Rational) -> ParamValues {
+        let values = self
+            .values
+            .iter()
+            .map(|(id, v)| {
+                let resolved = match v {
+                    ParamValue::FloatCurve(c) => ParamValue::Float(c.sample_at_time(time)),
+                    other => other.clone(),
+                };
+                (id.clone(), resolved)
+            })
+            .collect();
+        ParamValues { values }
+    }
+
     /// Convenience accessors.
     pub fn float(&self, id: &str) -> Option<f32> {
         self.get(id)?.as_float()
+    }
+    /// Sample a float (static or animated) at `time`.
+    pub fn float_at(&self, id: &str, time: Rational) -> Option<f32> {
+        self.get(id)?.as_float_at(time)
+    }
+    pub fn float_curve(&self, id: &str) -> Option<&Curve<f32>> {
+        self.get(id)?.as_float_curve()
     }
     pub fn int(&self, id: &str) -> Option<i32> {
         self.get(id)?.as_int()
@@ -250,5 +298,79 @@ mod tests {
         v.set("a", ParamValue::Bool(false));
         let ids: Vec<&str> = v.iter().map(|(id, _)| id).collect();
         assert_eq!(ids, ["a", "z"]);
+    }
+
+    use crate::model::{InterpKind, Keyframe};
+
+    #[test]
+    fn float_curve_round_trips_through_serde() {
+        let mut v = ParamValues::new();
+        v.set(
+            "g",
+            ParamValue::FloatCurve(Curve::Animated(vec![
+                Keyframe {
+                    t: Rational::new(0, 30),
+                    v: 0.0,
+                    interp: InterpKind::Linear,
+                },
+                Keyframe {
+                    t: Rational::new(60, 30),
+                    v: 1.0,
+                    interp: InterpKind::EaseInOut,
+                },
+            ])),
+        );
+        let s = ron::ser::to_string_pretty(&v, ron::ser::PrettyConfig::default()).unwrap();
+        let back: ParamValues = ron::from_str(&s).unwrap();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn float_at_samples_curve() {
+        let mut v = ParamValues::new();
+        v.set(
+            "g",
+            ParamValue::FloatCurve(Curve::Animated(vec![
+                Keyframe {
+                    t: Rational::new(0, 30),
+                    v: 0.0,
+                    interp: InterpKind::Linear,
+                },
+                Keyframe {
+                    t: Rational::new(60, 30),
+                    v: 1.0,
+                    interp: InterpKind::Linear,
+                },
+            ])),
+        );
+        // Midpoint at frame 30 (1.0s on a 30/30 curve).
+        let mid = v.float_at("g", Rational::new(30, 30)).unwrap();
+        assert!((mid - 0.5).abs() < 1e-6);
+        // Static accessor returns None for an animated value.
+        assert!(v.float("g").is_none());
+    }
+
+    #[test]
+    fn resolved_at_collapses_curve_to_static_float() {
+        let mut v = ParamValues::new();
+        v.set(
+            "g",
+            ParamValue::FloatCurve(Curve::Animated(vec![
+                Keyframe {
+                    t: Rational::new(0, 30),
+                    v: 0.0,
+                    interp: InterpKind::Linear,
+                },
+                Keyframe {
+                    t: Rational::new(60, 30),
+                    v: 1.0,
+                    interp: InterpKind::Linear,
+                },
+            ])),
+        );
+        v.set("h", ParamValue::Bool(true));
+        let resolved = v.resolved_at(Rational::new(30, 30));
+        assert_eq!(resolved.float("g"), Some(0.5));
+        assert_eq!(resolved.bool("h"), Some(true));
     }
 }

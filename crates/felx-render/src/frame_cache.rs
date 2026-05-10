@@ -6,7 +6,7 @@
 //! change implicitly invalidates the affected entries — no manual
 //! invalidation API needed for the common edit-and-replay flow.
 
-use felx_core::model::Effect;
+use felx_core::model::{Curve, Effect, InterpKind};
 use felx_core::params::ParamValue;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -90,6 +90,39 @@ fn hash_param_value(v: &ParamValue, h: &mut impl Hasher) {
             6u8.hash(h);
             b.hash(h);
         }
+        ParamValue::FloatCurve(c) => {
+            7u8.hash(h);
+            hash_float_curve(c, h);
+        }
+    }
+}
+
+fn hash_float_curve(c: &Curve<f32>, h: &mut impl Hasher) {
+    match c {
+        Curve::Static(v) => {
+            0u8.hash(h);
+            v.to_bits().hash(h);
+        }
+        Curve::Animated(kfs) => {
+            1u8.hash(h);
+            (kfs.len() as u32).hash(h);
+            for k in kfs {
+                k.t.num.hash(h);
+                k.t.den.hash(h);
+                k.v.to_bits().hash(h);
+                interp_kind_tag(k.interp).hash(h);
+            }
+        }
+    }
+}
+
+fn interp_kind_tag(k: InterpKind) -> u8 {
+    match k {
+        InterpKind::Hold => 0,
+        InterpKind::Linear => 1,
+        InterpKind::EaseIn => 2,
+        InterpKind::EaseOut => 3,
+        InterpKind::EaseInOut => 4,
     }
 }
 

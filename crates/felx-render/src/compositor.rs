@@ -18,7 +18,7 @@ use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::transform_pass::{TransformParams, TransformPass};
 use crate::{Renderer, RendererError};
-use felx_core::model::{CompId, Effect, Layer, LayerKind, Project};
+use felx_core::model::{CompId, Effect, Frame, Framerate, Layer, LayerKind, Project};
 use image::{ImageBuffer, Rgba, RgbaImage, imageops};
 use tracing::{debug, debug_span, info_span, warn};
 
@@ -346,12 +346,21 @@ impl Compositor {
             comp.background,
         );
 
+        let framerate = comp.framerate;
         for (idx, layer) in visible.iter().enumerate() {
             if matte_source_indices.contains(&idx) {
                 continue;
             }
-            let mut layer_tex =
-                self.render_layer(project, layer, comp.background, scale, rw, rh, frame)?;
+            let mut layer_tex = self.render_layer(
+                project,
+                layer,
+                comp.background,
+                scale,
+                rw,
+                rh,
+                frame,
+                framerate,
+            )?;
 
             if let Some(mode) = layer.track_matte
                 && idx + 1 < visible.len()
@@ -365,6 +374,7 @@ impl Compositor {
                     rw,
                     rh,
                     frame,
+                    framerate,
                 )?;
                 layer_tex = self.apply_matte(layer_tex, source_tex, rw, rh, mode.shader_index());
             }
@@ -418,6 +428,7 @@ impl Compositor {
         rw: u32,
         rh: u32,
         frame: u32,
+        framerate: Framerate,
     ) -> Result<wgpu::Texture, CompositorError> {
         let source_image = {
             let _s = debug_span!("compositor.resolve_source", layer = layer.id.0).entered();
@@ -425,11 +436,20 @@ impl Compositor {
         };
         let mut current_tex = upload_image(&self.renderer, &source_image);
 
+        let time = Frame(frame).to_time(framerate);
         for eff in &layer.effects {
             if !eff.enabled {
                 continue;
             }
-            current_tex = self.apply_effect(eff, current_tex, rw, rh)?;
+            // Resolve animated parameters at the playhead time once. Effect
+            // dispatch reads from the resolved view so effect-specific code
+            // never has to know whether a parameter was animated.
+            let resolved = Effect {
+                id: eff.id.clone(),
+                enabled: eff.enabled,
+                values: eff.values.resolved_at(time),
+            };
+            current_tex = self.apply_effect(&resolved, current_tex, rw, rh)?;
         }
 
         // Background for the per-layer transform pass is transparent so the
