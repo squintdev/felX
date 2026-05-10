@@ -6,6 +6,7 @@ use crate::blend_pass::{BlendParams, BlendPass};
 use crate::clear_pass::clear_to;
 use crate::cpu_pass::run_cpu_pass;
 use crate::effect_state::{EffectStateRegistry, StateKey};
+use crate::effects::bloom::{Bloom, BlurParams, CompositeParams, ThresholdParams};
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::crt::{self, Crt, CrtParams};
 use crate::effects::crt_persistence::{CrtPersistence, CrtPersistenceParams};
@@ -182,6 +183,7 @@ pub struct Compositor {
     signal: Signal,
     crt: Crt,
     crt_persistence: CrtPersistence,
+    bloom: Bloom,
     vhs: Vhs,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
@@ -206,6 +208,7 @@ impl Compositor {
         let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
         let crt = Crt::new(&renderer, COMPOSITOR_FORMAT);
         let crt_persistence = CrtPersistence::new(&renderer, COMPOSITOR_FORMAT);
+        let bloom = Bloom::new(&renderer, COMPOSITOR_FORMAT);
         let vhs = Vhs::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
@@ -219,6 +222,7 @@ impl Compositor {
             signal,
             crt,
             crt_persistence,
+            bloom,
             vhs,
             srgb_wrap,
             transform_pass,
@@ -663,6 +667,9 @@ impl Compositor {
         current_frame: u32,
     ) -> Result<wgpu::Texture, CompositorError> {
         let _span = debug_span!("compositor.effect", id = %eff.id).entered();
+        if eff.id == "bloom" {
+            return Ok(self.apply_bloom(eff, input, w, h));
+        }
         if eff.id == "crt_persistence" {
             return Ok(self.apply_crt_persistence(
                 eff,
@@ -914,6 +921,91 @@ impl Compositor {
         self.pool.release(encoded);
         self.pool.release(toned);
         Ok(decoded)
+    }
+
+    fn apply_bloom(&mut self, eff: &Effect, input: wgpu::Texture, w: u32, h: u32) -> wgpu::Texture {
+        let threshold = eff.values.float("threshold").unwrap_or(0.7);
+        let intensity = eff.values.float("intensity").unwrap_or(0.6);
+        let radius = eff.values.float("radius").unwrap_or(4.0);
+        let soft_knee = eff.values.float("soft_knee").unwrap_or(0.3);
+
+        // 1) Threshold pass into a fresh pool texture.
+        let bright = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        // 2) Horizontal blur into a second.
+        let h_blur = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        // 3) Vertical blur into a third.
+        let v_blur = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        // 4) Composite with the original into a final pool texture.
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let bright_view = bright.create_view(&wgpu::TextureViewDescriptor::default());
+        let h_blur_view = h_blur.create_view(&wgpu::TextureViewDescriptor::default());
+        let v_blur_view = v_blur.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.bloom"),
+                });
+        self.bloom.render_threshold(
+            &self.renderer,
+            &mut cmd,
+            &in_view,
+            &bright_view,
+            ThresholdParams {
+                threshold,
+                soft_knee,
+                _pad0: 0.0,
+                _pad1: 0.0,
+            },
+        );
+        self.bloom.render_blur(
+            &self.renderer,
+            &mut cmd,
+            &bright_view,
+            &h_blur_view,
+            BlurParams {
+                direction_x: 1.0,
+                direction_y: 0.0,
+                radius,
+                _pad: 0.0,
+            },
+        );
+        self.bloom.render_blur(
+            &self.renderer,
+            &mut cmd,
+            &h_blur_view,
+            &v_blur_view,
+            BlurParams {
+                direction_x: 0.0,
+                direction_y: 1.0,
+                radius,
+                _pad: 0.0,
+            },
+        );
+        self.bloom.render_composite(
+            &self.renderer,
+            &mut cmd,
+            &in_view,
+            &v_blur_view,
+            &out_view,
+            CompositeParams {
+                intensity,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+            },
+        );
+        self.renderer.queue().submit(Some(cmd.finish()));
+
+        self.pool.release(input);
+        self.pool.release(bright);
+        self.pool.release(h_blur);
+        self.pool.release(v_blur);
+        output
     }
 
     #[allow(clippy::too_many_arguments)]

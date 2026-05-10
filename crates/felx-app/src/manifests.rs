@@ -18,6 +18,7 @@ const BUILTIN_EFFECTS: &[&str] = &[
     "crt",
     "vhs",
     "crt_persistence",
+    "bloom",
 ];
 
 #[derive(Debug, Default)]
