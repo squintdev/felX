@@ -1,0 +1,32 @@
+// VHS — combined physical-tape artifacts. v1 ships as one effect; F-080…
+// F-084 split into atomic chainable passes in a follow-up. Vertical roll
+// triggers are driven by user keyframes on `vertical_scroll`.
+(
+    id: "vhs",
+    display_name: "VHS",
+    category: "Stylize",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (id: "sync_wobble", display_name: "Sync Wobble (px)",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 16.0))),
+        (id: "dropouts_density", display_name: "Dropouts Density",
+         kind: Float(default: 0.2, range: (min: 0.0, max: 1.0))),
+        (id: "dropouts_polarity", display_name: "Dropouts Polarity",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 1.0))),
+        (id: "tape_damage", display_name: "Tape Damage",
+         kind: Float(default: 0.2, range: (min: 0.0, max: 1.0))),
+        (id: "transport_brightness", display_name: "Transport Brightness",
+         kind: Float(default: 0.2, range: (min: 0.0, max: 1.0))),
+        (id: "transport_chroma_phase", display_name: "Transport Chroma Phase",
+         kind: Float(default: 0.1, range: (min: 0.0, max: 1.0))),
+        (id: "transport_freq", display_name: "Transport Freq (Hz)",
+         kind: Float(default: 0.5, range: (min: 0.0, max: 10.0))),
+        (id: "vertical_scroll", display_name: "Vertical Scroll",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+        (id: "seed", display_name: "Seed",
+         kind: Int(default: 0, range: (min: 0, max: 1000000))),
+        (id: "time_seconds", display_name: "Time (s)",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1000000.0))),
+    ],
+)

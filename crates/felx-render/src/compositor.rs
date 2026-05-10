@@ -11,6 +11,7 @@ use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::effects::squint_diffusion::{self, DiffusionParams};
 use crate::effects::signal::{Signal, SignalParams};
+use crate::effects::vhs::{Vhs, VhsParams};
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::matte_pass::{MatteParams, MattePass};
 use crate::srgb_wrap::SrgbWrap;
@@ -166,6 +167,7 @@ pub struct Compositor {
     cc_toner: CcToner,
     signal: Signal,
     crt: Crt,
+    vhs: Vhs,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
     blend_pass: BlendPass,
@@ -184,6 +186,7 @@ impl Compositor {
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
         let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
         let crt = Crt::new(&renderer, COMPOSITOR_FORMAT);
+        let vhs = Vhs::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
@@ -194,6 +197,7 @@ impl Compositor {
             cc_toner,
             signal,
             crt,
+            vhs,
             srgb_wrap,
             transform_pass,
             blend_pass,
@@ -582,6 +586,7 @@ impl Compositor {
                 Ok(output)
             }
             "crt" => self.apply_crt(eff, input, w, h),
+            "vhs" => self.apply_vhs(eff, input, w, h),
             other => {
                 warn!(effect_id = other, "skipping unknown effect");
                 Ok(input)
@@ -633,6 +638,43 @@ impl Compositor {
                     label: Some("compositor.crt"),
                 });
         self.crt
+            .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        Ok(output)
+    }
+
+    fn apply_vhs(
+        &mut self,
+        eff: &Effect,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let params = VhsParams::new(
+            eff.values.float("sync_wobble").unwrap_or(1.0),
+            eff.values.float("dropouts_density").unwrap_or(0.2),
+            eff.values.float("dropouts_polarity").unwrap_or(1.0),
+            eff.values.float("tape_damage").unwrap_or(0.2),
+            eff.values.float("transport_brightness").unwrap_or(0.2),
+            eff.values.float("transport_chroma_phase").unwrap_or(0.1),
+            eff.values.float("transport_freq").unwrap_or(0.5),
+            eff.values.float("vertical_scroll").unwrap_or(0.0),
+            eff.values.int("seed").unwrap_or(0) as f32,
+            eff.values.float("time_seconds").unwrap_or(0.0),
+            [w as f32, h as f32],
+        );
+
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.vhs"),
+                });
+        self.vhs
             .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
         self.renderer.queue().submit(Some(cmd.finish()));
         self.pool.release(input);

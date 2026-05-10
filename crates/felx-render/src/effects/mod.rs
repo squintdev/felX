@@ -8,3 +8,4 @@ pub mod gain;
 pub mod invert;
 pub mod squint_diffusion;
 pub mod signal;
+pub mod vhs;
