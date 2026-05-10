@@ -66,6 +66,41 @@ pub fn show(
     let shift_held = ui.input(|i| i.modifiers.shift);
     let delete_pressed = ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace));
 
+    // Hotkey banner — discoverable, low-noise.
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} keyframe(s) selected", selection.keys.len()))
+                .small()
+                .color(Color32::from_gray(160)),
+        );
+        ui.separator();
+        ui.label(
+            egui::RichText::new(
+                "Interp: 1=Hold 2=Linear 3=EaseIn 4=EaseOut 5=EaseInOut · Del=delete",
+            )
+            .small()
+            .color(Color32::from_gray(140)),
+        );
+    });
+    ui.separator();
+
+    // Numeric hotkeys for interp presets (F-037). Apply to selection.
+    let interp_hotkey: Option<InterpKind> = ui.input(|i| {
+        if i.key_pressed(Key::Num1) {
+            Some(InterpKind::Hold)
+        } else if i.key_pressed(Key::Num2) {
+            Some(InterpKind::Linear)
+        } else if i.key_pressed(Key::Num3) {
+            Some(InterpKind::EaseIn)
+        } else if i.key_pressed(Key::Num4) {
+            Some(InterpKind::EaseOut)
+        } else if i.key_pressed(Key::Num5) {
+            Some(InterpKind::EaseInOut)
+        } else {
+            None
+        }
+    });
+
     for row in &rows {
         actions.extend(draw_row(
             ui,
@@ -81,6 +116,12 @@ pub fn show(
     if delete_pressed && !selection.keys.is_empty() {
         actions.extend(bulk_delete(&selection, &rows));
         selection.keys.clear();
+    }
+
+    if let Some(kind) = interp_hotkey
+        && !selection.keys.is_empty()
+    {
+        actions.extend(bulk_set_interp(&selection, &rows, kind));
     }
 
     ui.ctx()
@@ -446,6 +487,51 @@ fn draw_row(
     actions
 }
 
+/// Bulk-set the interp kind on every selected keyframe, grouped by curve.
+/// Emits one SetValue per affected (effect, param) pair.
+fn bulk_set_interp(
+    sel: &GraphSelection,
+    rows: &[AnimatedRow],
+    kind: InterpKind,
+) -> Vec<EffectsAction> {
+    use std::collections::HashMap;
+    let mut by_param: HashMap<(usize, String), Vec<usize>> = HashMap::new();
+    for (eidx, pid, kf_idx) in &sel.keys {
+        by_param
+            .entry((*eidx, pid.clone()))
+            .or_default()
+            .push(*kf_idx);
+    }
+    let mut out = Vec::new();
+    for ((eidx, pid), indices) in by_param {
+        let row = rows
+            .iter()
+            .find(|r| r.effect_index == eidx && r.param_id == pid);
+        let Some(row) = row else { continue };
+        let kfs = match &row.curve {
+            Curve::Animated(k) => k.clone(),
+            _ => continue,
+        };
+        let touched: HashSet<usize> = indices.into_iter().collect();
+        let new_kfs: Vec<Keyframe<f32>> = kfs
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut k)| {
+                if touched.contains(&i) {
+                    k.interp = kind;
+                }
+                k
+            })
+            .collect();
+        out.push(EffectsAction::SetValue {
+            effect_index: eidx,
+            id: pid,
+            value: ParamValue::FloatCurve(Curve::Animated(new_kfs)),
+        });
+    }
+    out
+}
+
 /// Bulk-delete: collapse all selected keyframes by parameter, emit one
 /// SetValue per affected curve. Always preserves at least one keyframe.
 fn bulk_delete(sel: &GraphSelection, rows: &[AnimatedRow]) -> Vec<EffectsAction> {
@@ -528,6 +614,45 @@ mod tests {
             assert_eq!(kfs.len(), 1, "must keep at least one keyframe");
         } else {
             panic!("expected SetValue with FloatCurve");
+        }
+    }
+
+    #[test]
+    fn bulk_set_interp_only_touches_selected_keyframes() {
+        let r = row(
+            0,
+            "g",
+            vec![
+                Keyframe {
+                    t: Rational::new(0, 30),
+                    v: 0.0,
+                    interp: InterpKind::Linear,
+                },
+                Keyframe {
+                    t: Rational::new(30, 30),
+                    v: 0.5,
+                    interp: InterpKind::Linear,
+                },
+                Keyframe {
+                    t: Rational::new(60, 30),
+                    v: 1.0,
+                    interp: InterpKind::Linear,
+                },
+            ],
+        );
+        let mut sel = GraphSelection::default();
+        sel.keys.insert((0, "g".to_string(), 1));
+        let actions = bulk_set_interp(&sel, std::slice::from_ref(&r), InterpKind::EaseInOut);
+        if let EffectsAction::SetValue {
+            value: ParamValue::FloatCurve(Curve::Animated(kfs)),
+            ..
+        } = &actions[0]
+        {
+            assert_eq!(kfs[0].interp, InterpKind::Linear);
+            assert_eq!(kfs[1].interp, InterpKind::EaseInOut);
+            assert_eq!(kfs[2].interp, InterpKind::Linear);
+        } else {
+            panic!()
         }
     }
 
