@@ -317,15 +317,18 @@ impl VideoDecoder for FfmpegDecoder {
                         self.decoder.send_packet(&packet)?;
                     }
                 }
-                Some(Err(e)) => return Err(DecodeError::Ffmpeg(e)),
-                None => {
-                    // EOF: tell the decoder we're done so it can drain.
-                    self.decoder.send_eof()?;
+                // Some implementations return Some(Err(Eof)) at the end of
+                // the file rather than None — handle both as "drain decoder".
+                Some(Err(ffmpeg::Error::Eof)) | None => {
+                    // send_eof returns Eof itself if it's already been
+                    // signalled; on the second loop iteration that's expected.
+                    let _ = self.decoder.send_eof();
                     match self.decoder.receive_frame(&mut decoded) {
                         Ok(_) => continue,
                         Err(_) => return Ok(None),
                     }
                 }
+                Some(Err(e)) => return Err(DecodeError::Ffmpeg(e)),
             }
         }
     }
