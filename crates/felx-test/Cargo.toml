@@ -1,0 +1,12 @@
+[package]
+name = "felx-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Visual regression test harness for analog-felx (golden-image diffing)."
+publish = false
+
+[dependencies]
+image = { workspace = true }

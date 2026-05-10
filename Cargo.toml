@@ -5,6 +5,7 @@ members = [
     "crates/felx-render",
     "crates/felx-cli",
     "crates/felx-app",
+    "crates/felx-test",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ authors = ["SquintDev <thomas.edward.duffy@gmail.com>"]
 [workspace.dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 lto = "thin"
