@@ -9,6 +9,8 @@
 
 mod app;
 mod audio_playback;
+mod autosave;
+mod crash_reporter;
 mod curve_widget;
 mod hot_reload;
 mod manifests;
@@ -21,6 +23,7 @@ use eframe::NativeOptions;
 
 fn main() -> eframe::Result<()> {
     felx_core::diagnostics::init_tracing();
+    crash_reporter::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "felx-app starting");
 
     let options = NativeOptions {
