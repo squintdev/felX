@@ -13,6 +13,7 @@ use crate::effects::squint_diffusion::{self, DiffusionParams};
 use crate::effects::signal::{Signal, SignalParams};
 use crate::effects::vhs::{Vhs, VhsParams};
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
+use crate::mask_pass::{MaskApply, rasterize_masks};
 use crate::matte_pass::{MatteParams, MattePass};
 use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
@@ -183,6 +184,7 @@ pub struct Compositor {
     transform_pass: TransformPass,
     blend_pass: BlendPass,
     matte_pass: MattePass,
+    mask_apply: MaskApply,
     pool: TexturePool,
     cache: FrameCache,
 }
@@ -202,6 +204,7 @@ impl Compositor {
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
         let matte_pass = MattePass::new(&renderer, COMPOSITOR_FORMAT);
+        let mask_apply = MaskApply::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
@@ -213,6 +216,7 @@ impl Compositor {
             transform_pass,
             blend_pass,
             matte_pass,
+            mask_apply,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
         }
@@ -517,6 +521,11 @@ impl Compositor {
                 values: eff.values.resolved_at(time),
             };
             current_tex = self.apply_effect(&resolved, current_tex, rw, rh)?;
+        }
+
+        // Mask the layer's alpha (F-061…F-066).
+        if !layer.masks.is_empty() {
+            current_tex = self.apply_masks(&layer.masks, current_tex, rw, rh, time);
         }
 
         // Background for the per-layer transform pass is transparent so the
@@ -872,6 +881,34 @@ impl Compositor {
         self.pool.release(encoded);
         self.pool.release(toned);
         Ok(decoded)
+    }
+
+    fn apply_masks(
+        &mut self,
+        masks: &[felx_core::model::Mask],
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+        time: felx_core::model::Rational,
+    ) -> wgpu::Texture {
+        let _s = debug_span!("compositor.masks", count = masks.len()).entered();
+        let mask_img = rasterize_masks(masks, w, h, time);
+        let mask_tex = upload_image(&self.renderer, &mask_img);
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_view = mask_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.masks"),
+                });
+        self.mask_apply
+            .apply(&self.renderer, &mut cmd, &in_view, &mask_view, &out_view);
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        output
     }
 
     /// Apply a layer's effect stack to an arbitrary input texture and

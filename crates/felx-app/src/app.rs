@@ -6,6 +6,7 @@ use crate::manifests::ManifestRegistry;
 use crate::panels::effects::{self, EffectsAction};
 use crate::panels::graph_editor;
 use crate::panels::layers::{self, LayerAction};
+use crate::panels::masks::{self, MaskAction, PenState};
 use crate::panels::transport::{self, TransportAction};
 use crate::playback::Playhead;
 use crate::presets::PresetRegistry;
@@ -53,6 +54,10 @@ pub struct FelxApp {
     render_region: Option<RegionRect>,
     /// Mid-drag state for the shift-drag region selector. Normalized.
     region_drag_anchor: Option<egui::Vec2>,
+    /// Pen-tool in-progress state for mask drawing (F-065). Click on the
+    /// viewer drops corner anchors; clicking near the first one closes the
+    /// path and creates a new mask on the selected layer.
+    pen: PenState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,6 +146,7 @@ impl FelxApp {
             graph_editor_open: false,
             render_region: None,
             region_drag_anchor: None,
+            pen: PenState::default(),
         })
     }
 
@@ -293,6 +299,113 @@ impl FelxApp {
         }
         self.render_dirty = true;
         self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+    }
+
+    fn apply_mask_actions(&mut self, actions: Vec<MaskAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        let mut dirty = false;
+        for action in actions {
+            match action {
+                MaskAction::AddRectangle(layer_id) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        let w = comp.width as f32;
+                        let h = comp.height as f32;
+                        if let Some(layer) = comp.layer_mut(layer_id) {
+                            layer.masks.push(felx_core::model::Mask::rectangle(
+                                format!("Mask {}", layer.masks.len() + 1),
+                                w * 0.25,
+                                h * 0.25,
+                                w * 0.5,
+                                h * 0.5,
+                            ));
+                            dirty = true;
+                        }
+                    }
+                }
+                MaskAction::AddEllipse(layer_id) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        let w = comp.width as f32;
+                        let h = comp.height as f32;
+                        if let Some(layer) = comp.layer_mut(layer_id) {
+                            layer.masks.push(felx_core::model::Mask::ellipse(
+                                format!("Mask {}", layer.masks.len() + 1),
+                                w * 0.5,
+                                h * 0.5,
+                                w * 0.25,
+                                h * 0.25,
+                            ));
+                            dirty = true;
+                        }
+                    }
+                }
+                MaskAction::StartPen(layer_id) => {
+                    self.pen.start(layer_id);
+                }
+                MaskAction::Delete { layer, index } => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(l) = comp.layer_mut(layer)
+                        && index < l.masks.len()
+                    {
+                        l.masks.remove(index);
+                        dirty = true;
+                    }
+                }
+                MaskAction::SetMode { layer, index, mode } => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(l) = comp.layer_mut(layer)
+                        && let Some(m) = l.masks.get_mut(index)
+                    {
+                        m.mode = mode;
+                        dirty = true;
+                    }
+                }
+                MaskAction::SetOpacity {
+                    layer,
+                    index,
+                    value,
+                } => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(l) = comp.layer_mut(layer)
+                        && let Some(m) = l.masks.get_mut(index)
+                    {
+                        m.opacity = value;
+                        dirty = true;
+                    }
+                }
+                MaskAction::SetFeather {
+                    layer,
+                    index,
+                    value,
+                } => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(l) = comp.layer_mut(layer)
+                        && let Some(m) = l.masks.get_mut(index)
+                    {
+                        m.feather = value;
+                        dirty = true;
+                    }
+                }
+                MaskAction::SetExpansion {
+                    layer,
+                    index,
+                    value,
+                } => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id)
+                        && let Some(l) = comp.layer_mut(layer)
+                        && let Some(m) = l.masks.get_mut(index)
+                    {
+                        m.expansion = value;
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.render_dirty = true;
+            self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+        }
     }
 
     fn apply_layer_actions(&mut self, actions: Vec<LayerAction>) {
@@ -468,16 +581,31 @@ impl App for FelxApp {
             self.apply_effects_actions(graph_actions);
         }
 
-        let layer_actions = SidePanel::left("layers")
+        let (layer_actions, mask_actions) = SidePanel::left("layers")
             .resizable(true)
             .default_width(220.0)
             .min_width(180.0)
             .show(ctx, |ui| {
                 let comp = self.project.composition(self.comp_id).expect("comp exists");
-                layers::show(ui, comp, self.selected_layer)
+                let layer_actions = layers::show(ui, comp, self.selected_layer);
+                let mut mask_actions: Vec<MaskAction> = Vec::new();
+                if let Some(sel_id) = self.selected_layer
+                    && let Some(layer) = comp.layer(sel_id)
+                {
+                    ui.separator();
+                    mask_actions = masks::show(
+                        ui,
+                        sel_id,
+                        &layer.masks,
+                        self.pen.layer == Some(sel_id),
+                        self.pen.anchors.len(),
+                    );
+                }
+                (layer_actions, mask_actions)
             })
             .inner;
         self.apply_layer_actions(layer_actions);
+        self.apply_mask_actions(mask_actions);
 
         let effects_actions = SidePanel::right("effects")
             .resizable(true)
@@ -515,6 +643,55 @@ impl App for FelxApp {
                 if esc_pressed {
                     self.render_region = None;
                     self.region_drag_anchor = None;
+                    if self.pen.layer.is_some() {
+                        self.pen.cancel();
+                    }
+                }
+
+                // Pen tool (F-065): plain clicks while a pen session is
+                // active drop corner anchors. Click near the first anchor
+                // to close the path and commit a new mask. Tangent-handle
+                // dragging is a polish follow-up.
+                if let Some(pen_layer) = self.pen.layer
+                    && response.clicked()
+                    && !shift_held
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    let comp_for_pen = self.project.composition(self.comp_id).expect("comp exists");
+                    let comp_w = comp_for_pen.width as f32;
+                    let comp_h = comp_for_pen.height as f32;
+                    let u = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                    let v = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                    let cx = u * comp_w;
+                    let cy = v * comp_h;
+                    let close_threshold_px = 12.0;
+                    let close_threshold_comp = close_threshold_px * (comp_w / rect.width());
+                    let should_close = self.pen.anchors.len() >= 3 && {
+                        let first = self.pen.anchors[0].anchor;
+                        let dx = first[0] - cx;
+                        let dy = first[1] - cy;
+                        (dx * dx + dy * dy).sqrt() <= close_threshold_comp
+                    };
+                    if should_close {
+                        if let Some(path) = self.pen.close_into_path()
+                            && let Some(comp) = self.project.composition_mut(self.comp_id)
+                            && let Some(layer) = comp.layer_mut(pen_layer)
+                        {
+                            let mask = felx_core::model::Mask {
+                                name: format!("Pen mask {}", layer.masks.len() + 1),
+                                mode: felx_core::model::MaskMode::default(),
+                                opacity: 1.0,
+                                expansion: 0.0,
+                                feather: 0.0,
+                                path: felx_core::model::Curve::Static(path),
+                            };
+                            layer.masks.push(mask);
+                            self.render_dirty = true;
+                            self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+                        }
+                    } else {
+                        self.pen.add_anchor(cx, cy);
+                    }
                 }
                 if response.drag_started() && shift_held {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -582,6 +759,41 @@ impl App for FelxApp {
                                 .italics(),
                         );
                     });
+                }
+
+                // Pen-tool overlay: draw anchors and the polyline so far.
+                if self.pen.layer.is_some() && !self.pen.anchors.is_empty() {
+                    let comp_for_pen = self.project.composition(self.comp_id).expect("comp exists");
+                    let comp_w = comp_for_pen.width as f32;
+                    let comp_h = comp_for_pen.height as f32;
+                    let painter = ui.painter_at(rect);
+                    let to_screen = |x: f32, y: f32| -> egui::Pos2 {
+                        egui::pos2(
+                            rect.left() + (x / comp_w) * rect.width(),
+                            rect.top() + (y / comp_h) * rect.height(),
+                        )
+                    };
+                    let mut prev: Option<egui::Pos2> = None;
+                    for v in &self.pen.anchors {
+                        let p = to_screen(v.anchor[0], v.anchor[1]);
+                        if let Some(prev_p) = prev {
+                            painter.line_segment(
+                                [prev_p, p],
+                                egui::Stroke::new(1.0, Color32::from_rgb(255, 220, 80)),
+                            );
+                        }
+                        painter.circle_filled(p, 4.0, Color32::from_rgb(255, 220, 80));
+                        painter.circle_stroke(p, 4.0, egui::Stroke::new(1.0, Color32::BLACK));
+                        prev = Some(p);
+                    }
+                    if let Some(first) = self.pen.anchors.first() {
+                        let p_first = to_screen(first.anchor[0], first.anchor[1]);
+                        painter.circle_stroke(
+                            p_first,
+                            8.0,
+                            egui::Stroke::new(1.0, Color32::from_rgb(255, 220, 80)),
+                        );
+                    }
                 }
 
                 if let Some(err) = self.shader_error.as_deref() {

@@ -60,6 +60,7 @@ impl Composition {
             track_matte: None,
             time_offset_frames: 0,
             time_scale: 1.0,
+            masks: vec![],
         });
         id
     }

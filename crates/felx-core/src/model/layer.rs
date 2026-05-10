@@ -1,6 +1,6 @@
 //! Layer types and the per-kind data they carry.
 
-use crate::model::{AssetId, CompId, Effect, Transform};
+use crate::model::{AssetId, CompId, Effect, Mask, Transform};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +138,10 @@ pub struct Layer {
     /// keyframed time-remap (per-frame curve) is post-MVP.
     #[serde(default = "default_time_scale")]
     pub time_scale: f32,
+    /// Per-layer bezier-path masks (F-061). Combined left-to-right via
+    /// each mask's [`MaskMode`].
+    #[serde(default)]
+    pub masks: Vec<Mask>,
 }
 
 fn default_time_scale() -> f32 {
@@ -229,6 +233,7 @@ mod tests {
             track_matte: None,
             time_offset_frames: 0,
             time_scale: 1.0,
+            masks: vec![],
         };
         assert_eq!(l.duration(), 60);
     }
@@ -248,6 +253,7 @@ mod tests {
             track_matte: None,
             time_offset_frames: 0,
             time_scale: 1.0,
+            masks: vec![],
         };
         assert_eq!(l.duration(), 0);
     }
@@ -266,6 +272,7 @@ mod tests {
             track_matte: None,
             time_offset_frames: offset,
             time_scale: scale,
+            masks: vec![],
         }
     }
 

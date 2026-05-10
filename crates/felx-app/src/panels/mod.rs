@@ -4,4 +4,5 @@
 pub mod effects;
 pub mod graph_editor;
 pub mod layers;
+pub mod masks;
 pub mod transport;
