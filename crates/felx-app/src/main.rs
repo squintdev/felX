@@ -10,6 +10,7 @@
 mod app;
 mod manifests;
 mod panels;
+mod playback;
 
 use app::FelxApp;
 use eframe::NativeOptions;

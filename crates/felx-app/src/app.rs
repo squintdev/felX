@@ -4,9 +4,11 @@
 use crate::manifests::ManifestRegistry;
 use crate::panels::effects::{self, EffectsAction};
 use crate::panels::layers::{self, LayerAction};
+use crate::panels::transport::{self, TransportAction};
+use crate::playback::Playhead;
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
-use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, Vec2};
+use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
 use felx_core::model::{CompId, Effect, LayerId, Project};
 use felx_render::compositor::{Compositor, CompositorError};
 use felx_render::{AdapterInfo, Renderer};
@@ -15,15 +17,15 @@ use tracing::{error, info};
 pub struct FelxApp {
     project: Project,
     comp_id: CompId,
-    current_frame: u32,
+    playhead: Playhead,
     compositor: Compositor,
     selected_layer: Option<LayerId>,
     manifests: ManifestRegistry,
     /// Texture currently registered with egui's wgpu renderer. Replaced
     /// every time the compositor produces a new output texture.
     egui_texture: Option<TextureId>,
-    /// Bumped any time the compositor needs to re-render (e.g. layer add /
-    /// remove / reorder, parameter edit). [`ensure_frame_rendered`] watches it.
+    /// Set any time the compositor needs to re-render (layer or parameter
+    /// edit, scrub, playback advance). Cleared by [`ensure_frame_rendered`].
     render_dirty: bool,
 }
 
@@ -56,6 +58,8 @@ impl FelxApp {
         let compositor = Compositor::new(renderer);
         let manifests = ManifestRegistry::load_builtins();
         let (project, comp_id) = default_project(&manifests);
+        let comp = project.composition(comp_id).expect("comp exists");
+        let playhead = Playhead::new(comp.framerate.as_fps(), comp.duration_frames);
         info!(
             comp = comp_id.0,
             manifests = manifests.len(),
@@ -64,13 +68,40 @@ impl FelxApp {
         Ok(Self {
             project,
             comp_id,
-            current_frame: 0,
+            playhead,
             compositor,
             selected_layer: None,
             manifests,
             egui_texture: None,
             render_dirty: true,
         })
+    }
+
+    fn apply_transport_actions(&mut self, actions: Vec<TransportAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        let mut moved = false;
+        for action in actions {
+            match action {
+                TransportAction::Toggle => self.playhead.toggle(),
+                TransportAction::StepForward => {
+                    self.playhead.step_forward();
+                    moved = true;
+                }
+                TransportAction::StepBackward => {
+                    self.playhead.step_backward();
+                    moved = true;
+                }
+                TransportAction::Seek(f) => {
+                    self.playhead.seek(f);
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            self.render_dirty = true;
+        }
     }
 
     fn apply_effects_actions(&mut self, actions: Vec<EffectsAction>) {
@@ -155,22 +186,22 @@ impl FelxApp {
         if !self.render_dirty && self.egui_texture.is_some() {
             return;
         }
-        let texture =
-            match self
-                .compositor
-                .render_cached(&self.project, self.comp_id, self.current_frame)
-            {
-                Ok(t) => t,
-                Err(CompositorError::NoVisibleLayer) => {
-                    // Empty playhead; show a placeholder later. For now leave
-                    // texture unset.
-                    return;
-                }
-                Err(e) => {
-                    error!(error = %e, "compositor render failed");
-                    return;
-                }
-            };
+        let frame = self.playhead.current_frame();
+        let texture = match self
+            .compositor
+            .render_cached(&self.project, self.comp_id, frame)
+        {
+            Ok(t) => t,
+            Err(CompositorError::NoVisibleLayer) => {
+                // Empty playhead; show a placeholder later. For now leave
+                // texture unset.
+                return;
+            }
+            Err(e) => {
+                error!(error = %e, "compositor render failed");
+                return;
+            }
+        };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut renderer = render_state.renderer.write();
         let id =
@@ -193,6 +224,17 @@ impl App for FelxApp {
             return;
         };
         let render_state = render_state.clone();
+
+        // Advance the playhead off real elapsed time before drawing the UI
+        // so the transport bar shows the new frame.
+        if self.playhead.tick() {
+            self.render_dirty = true;
+        }
+
+        let transport_actions = TopBottomPanel::bottom("transport")
+            .show(ctx, |ui| transport::show(ui, &self.playhead))
+            .inner;
+        self.apply_transport_actions(transport_actions);
 
         let layer_actions = SidePanel::left("layers")
             .resizable(true)
@@ -220,6 +262,11 @@ impl App for FelxApp {
         self.apply_effects_actions(effects_actions);
 
         self.ensure_frame_rendered(&render_state);
+
+        // Keep the loop running while playing so tick() fires regularly.
+        if let Some(after) = self.playhead.repaint_after() {
+            ctx.request_repaint_after(after);
+        }
 
         CentralPanel::default()
             .frame(egui::Frame::default().fill(Color32::from_gray(15)))
