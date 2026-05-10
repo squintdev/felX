@@ -3,7 +3,7 @@
     id: "invert",
     display_name: "Invert",
     category: "Color",
-    working_space: "linear",
-    pass: "cpu",
+    working_space: linear,
+    pass: cpu,
     parameters: [],
 )

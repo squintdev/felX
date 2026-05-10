@@ -1,10 +1,10 @@
-// Effect manifest. The full schema lands with F-019; this file documents the
-// intended shape now and serves as a fixture once the parameter system is in.
+// Effect manifest, parsed by felx-core::params::EffectManifest.
 (
     id: "gain",
     display_name: "Gain",
     category: "Color",
-    working_space: "linear",
+    working_space: linear,
+    pass: gpu,
     parameters: [
         (
             id: "gain",
