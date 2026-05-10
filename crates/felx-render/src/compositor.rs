@@ -5,8 +5,10 @@
 use crate::blend_pass::{BlendParams, BlendPass};
 use crate::clear_pass::clear_to;
 use crate::cpu_pass::run_cpu_pass;
+use crate::effect_state::{EffectStateRegistry, StateKey};
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::crt::{self, Crt, CrtParams};
+use crate::effects::crt_persistence::{CrtPersistence, CrtPersistenceParams};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::effects::squint_diffusion::{self, DiffusionParams};
@@ -179,6 +181,7 @@ pub struct Compositor {
     cc_toner: CcToner,
     signal: Signal,
     crt: Crt,
+    crt_persistence: CrtPersistence,
     vhs: Vhs,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
@@ -187,6 +190,9 @@ pub struct Compositor {
     mask_apply: MaskApply,
     pool: TexturePool,
     cache: FrameCache,
+    /// Per-effect-instance frame-to-frame state (F-070). Holds ping-pong
+    /// textures for stateful effects like CRT phosphor persistence.
+    state: EffectStateRegistry,
 }
 
 impl Compositor {
@@ -199,6 +205,7 @@ impl Compositor {
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
         let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
         let crt = Crt::new(&renderer, COMPOSITOR_FORMAT);
+        let crt_persistence = CrtPersistence::new(&renderer, COMPOSITOR_FORMAT);
         let vhs = Vhs::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
@@ -211,6 +218,7 @@ impl Compositor {
             cc_toner,
             signal,
             crt,
+            crt_persistence,
             vhs,
             srgb_wrap,
             transform_pass,
@@ -219,6 +227,7 @@ impl Compositor {
             mask_apply,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
+            state: EffectStateRegistry::new(),
         }
     }
 
@@ -392,7 +401,8 @@ impl Compositor {
             // is unusual and explicitly out of scope for v1.
             if matches!(layer.kind, LayerKind::Adjustment) {
                 if !layer.effects.is_empty() {
-                    accumulator = self.apply_effect_stack(layer, accumulator, rw, rh, time)?;
+                    accumulator =
+                        self.apply_effect_stack(layer, accumulator, rw, rh, time, frame)?;
                 }
                 continue;
             }
@@ -508,7 +518,7 @@ impl Compositor {
         };
 
         let time = Frame(frame).to_time(framerate);
-        for eff in &layer.effects {
+        for (effect_index, eff) in layer.effects.iter().enumerate() {
             if !eff.enabled {
                 continue;
             }
@@ -520,7 +530,15 @@ impl Compositor {
                 enabled: eff.enabled,
                 values: eff.values.resolved_at(time),
             };
-            current_tex = self.apply_effect(&resolved, current_tex, rw, rh)?;
+            current_tex = self.apply_effect_at(
+                &resolved,
+                current_tex,
+                rw,
+                rh,
+                layer.id.0,
+                effect_index,
+                frame,
+            )?;
         }
 
         // Mask the layer's alpha (F-061…F-066).
@@ -633,14 +651,29 @@ impl Compositor {
         output
     }
 
-    fn apply_effect(
+    #[allow(clippy::too_many_arguments)]
+    fn apply_effect_at(
         &mut self,
         eff: &Effect,
         input: wgpu::Texture,
         w: u32,
         h: u32,
+        layer_id: u32,
+        effect_index: usize,
+        current_frame: u32,
     ) -> Result<wgpu::Texture, CompositorError> {
         let _span = debug_span!("compositor.effect", id = %eff.id).entered();
+        if eff.id == "crt_persistence" {
+            return Ok(self.apply_crt_persistence(
+                eff,
+                input,
+                w,
+                h,
+                layer_id,
+                effect_index,
+                current_frame,
+            ));
+        }
 
         match eff.id.as_str() {
             "gain" => {
@@ -883,6 +916,87 @@ impl Compositor {
         Ok(decoded)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn apply_crt_persistence(
+        &mut self,
+        eff: &Effect,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+        layer_id: u32,
+        effect_index: usize,
+        current_frame: u32,
+    ) -> wgpu::Texture {
+        let decay = eff.values.float("decay").unwrap_or(0.85);
+        let tint_r = eff.values.float("tint_r").unwrap_or(1.0);
+        let tint_g = eff.values.float("tint_g").unwrap_or(1.0);
+        let tint_b = eff.values.float("tint_b").unwrap_or(1.0);
+        let key = StateKey::new(layer_id, effect_index, "crt_persistence");
+        // Acquire ping-pong state: read = previous output, write = new output.
+        // Compute the views first so we don't hold the registry borrow
+        // across the queue submit.
+        let (prev_view, write_view, write_tex) = {
+            let acq =
+                self.state
+                    .acquire(&self.renderer, key, w, h, COMPOSITOR_FORMAT, current_frame);
+            (
+                acq.read
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+                acq.write
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+                acq.write.clone(),
+            )
+        };
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        // Pool-owned output. Downstream passes (transform, blend) recycle
+        // their input back into the pool, so handing them the state's
+        // write_tex would corrupt the next frame's read. Render into the
+        // state texture, then copy it into a fresh pool texture for the
+        // rest of the pipeline to consume.
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.crt_persistence"),
+                });
+        self.crt_persistence.render(
+            &self.renderer,
+            &mut cmd,
+            &in_view,
+            &prev_view,
+            &write_view,
+            CrtPersistenceParams {
+                decay,
+                tint_r,
+                tint_g,
+                tint_b,
+            },
+        );
+        cmd.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &write_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        output
+    }
+
     fn apply_masks(
         &mut self,
         masks: &[felx_core::model::Mask],
@@ -921,9 +1035,10 @@ impl Compositor {
         w: u32,
         h: u32,
         time: felx_core::model::Rational,
+        current_frame: u32,
     ) -> Result<wgpu::Texture, CompositorError> {
         let mut current = input;
-        for eff in &layer.effects {
+        for (effect_index, eff) in layer.effects.iter().enumerate() {
             if !eff.enabled {
                 continue;
             }
@@ -932,7 +1047,15 @@ impl Compositor {
                 enabled: eff.enabled,
                 values: eff.values.resolved_at(time),
             };
-            current = self.apply_effect(&resolved, current, w, h)?;
+            current = self.apply_effect_at(
+                &resolved,
+                current,
+                w,
+                h,
+                layer.id.0,
+                effect_index,
+                current_frame,
+            )?;
         }
         Ok(current)
     }

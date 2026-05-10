@@ -9,7 +9,16 @@ use tracing::{info, warn};
 
 /// Effects shipped with the binary. As the catalog grows this list grows;
 /// later we'll discover effects/<*>/manifest.ron at runtime.
-const BUILTIN_EFFECTS: &[&str] = &["gain", "invert"];
+const BUILTIN_EFFECTS: &[&str] = &[
+    "gain",
+    "invert",
+    "cc_toner",
+    "signal",
+    "squint_diffusion",
+    "crt",
+    "vhs",
+    "crt_persistence",
+];
 
 #[derive(Debug, Default)]
 pub struct ManifestRegistry {

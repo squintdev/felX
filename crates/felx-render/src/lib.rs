@@ -9,6 +9,7 @@ pub mod blend_pass;
 pub mod clear_pass;
 pub mod compositor;
 pub mod cpu_pass;
+pub mod effect_state;
 pub mod effects;
 pub mod frame_cache;
 pub mod mask_pass;

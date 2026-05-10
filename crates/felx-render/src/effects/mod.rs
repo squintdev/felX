@@ -4,6 +4,7 @@
 
 pub mod cc_toner;
 pub mod crt;
+pub mod crt_persistence;
 pub mod gain;
 pub mod invert;
 pub mod squint_diffusion;

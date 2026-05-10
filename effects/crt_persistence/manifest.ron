@@ -1,0 +1,24 @@
+// CRT Phosphor Persistence — stateful effect (F-079) that mixes the
+// current frame with a decayed copy of the previous frame, simulating
+// the slow phosphor falloff of a CRT screen.
+//
+// Uses the F-070 frame-to-frame state machinery: the compositor hands
+// the effect a ping-pong texture pair each frame; on a seek/scrub the
+// state resets and the trail starts fresh.
+(
+    id: "crt_persistence",
+    display_name: "CRT Persistence",
+    category: "Stylize",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (id: "decay", display_name: "Decay",
+         kind: Float(default: 0.85, range: (min: 0.0, max: 0.99))),
+        (id: "tint_r", display_name: "Trail Tint R",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 2.0))),
+        (id: "tint_g", display_name: "Trail Tint G",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 2.0))),
+        (id: "tint_b", display_name: "Trail Tint B",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 2.0))),
+    ],
+)
