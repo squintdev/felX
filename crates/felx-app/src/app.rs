@@ -1,10 +1,11 @@
 //! The eframe `App` impl. Owns the project, the compositor, and the egui
 //! texture handle that mirrors the compositor's output for display.
 
+use crate::panels::layers::{self, LayerAction};
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
-use egui::{CentralPanel, Color32, Context, Sense, TextureId, Vec2};
-use felx_core::model::{CompId, Effect, Project};
+use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, Vec2};
+use felx_core::model::{CompId, Effect, LayerId, Project};
 use felx_render::compositor::{Compositor, CompositorError};
 use felx_render::{AdapterInfo, Renderer};
 use tracing::{error, info};
@@ -14,9 +15,13 @@ pub struct FelxApp {
     comp_id: CompId,
     current_frame: u32,
     compositor: Compositor,
+    selected_layer: Option<LayerId>,
     /// Texture currently registered with egui's wgpu renderer. Replaced
     /// every time the compositor produces a new output texture.
     egui_texture: Option<TextureId>,
+    /// Bumped any time the compositor needs to re-render (e.g. layer add /
+    /// remove / reorder). [`ensure_frame_rendered`] watches it.
+    render_dirty: bool,
 }
 
 #[derive(Debug)]
@@ -53,12 +58,54 @@ impl FelxApp {
             comp_id,
             current_frame: 0,
             compositor,
+            selected_layer: None,
             egui_texture: None,
+            render_dirty: true,
         })
     }
 
+    fn apply_layer_actions(&mut self, actions: Vec<LayerAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        let dirty = !actions.is_empty();
+        for action in actions {
+            match action {
+                LayerAction::Select(id) => self.selected_layer = id,
+                LayerAction::AddSolid => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        let id = comp.add_solid("Solid", [0.5, 0.5, 0.5, 1.0]);
+                        self.selected_layer = Some(id);
+                    }
+                }
+                LayerAction::Delete(id) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.remove_layer(id);
+                    }
+                    if self.selected_layer == Some(id) {
+                        self.selected_layer = None;
+                    }
+                }
+                LayerAction::MoveUp(id) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.move_layer_up(id);
+                    }
+                }
+                LayerAction::MoveDown(id) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.move_layer_down(id);
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.render_dirty = true;
+            self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+        }
+    }
+
     fn ensure_frame_rendered(&mut self, render_state: &RenderState) {
-        if self.egui_texture.is_some() {
+        if !self.render_dirty && self.egui_texture.is_some() {
             return;
         }
         let texture =
@@ -84,6 +131,7 @@ impl FelxApp {
         if let Some(old) = self.egui_texture.replace(id) {
             renderer.free_texture(&old);
         }
+        self.render_dirty = false;
     }
 
     fn comp_aspect(&self) -> f32 {
@@ -98,6 +146,18 @@ impl App for FelxApp {
             return;
         };
         let render_state = render_state.clone();
+
+        let actions = SidePanel::left("layers")
+            .resizable(true)
+            .default_width(220.0)
+            .min_width(180.0)
+            .show(ctx, |ui| {
+                let comp = self.project.composition(self.comp_id).expect("comp exists");
+                layers::show(ui, comp, self.selected_layer)
+            })
+            .inner;
+        self.apply_layer_actions(actions);
+
         self.ensure_frame_rendered(&render_state);
 
         CentralPanel::default()

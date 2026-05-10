@@ -87,6 +87,36 @@ impl Composition {
         }
     }
 
+    /// Remove a layer by id. Returns the removed layer if found.
+    pub fn remove_layer(&mut self, id: LayerId) -> Option<Layer> {
+        let idx = self.layers.iter().position(|l| l.id == id)?;
+        Some(self.layers.remove(idx))
+    }
+
+    /// Move the layer with `id` up by one (toward index 0). No-op if it's
+    /// already first or doesn't exist. Returns true if a swap happened.
+    pub fn move_layer_up(&mut self, id: LayerId) -> bool {
+        match self.layers.iter().position(|l| l.id == id) {
+            Some(0) | None => false,
+            Some(i) => {
+                self.layers.swap(i - 1, i);
+                true
+            }
+        }
+    }
+
+    /// Move the layer with `id` down by one (toward the end). No-op if it's
+    /// already last or doesn't exist. Returns true if a swap happened.
+    pub fn move_layer_down(&mut self, id: LayerId) -> bool {
+        match self.layers.iter().position(|l| l.id == id) {
+            Some(i) if i + 1 < self.layers.len() => {
+                self.layers.swap(i, i + 1);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Recompute `next_layer_id` from existing layer IDs. Called after
     /// deserialize for files that didn't persist the allocator.
     pub fn fixup_after_load(&mut self) {
@@ -129,5 +159,45 @@ mod tests {
         assert_eq!(c.layers.len(), 2);
         assert_eq!(c.layers[0].in_frame, 0);
         assert_eq!(c.layers[0].out_frame, 30);
+    }
+
+    #[test]
+    fn remove_layer_drops_only_that_layer() {
+        let mut c = Composition::new(CompId(1), "main", 10, 10);
+        c.duration_frames = 30;
+        let a = c.add_layer("a", LayerKind::Null, 0, 30);
+        let b = c.add_layer("b", LayerKind::Null, 0, 30);
+        let removed = c.remove_layer(a).unwrap();
+        assert_eq!(removed.id, a);
+        assert_eq!(c.layers.len(), 1);
+        assert_eq!(c.layers[0].id, b);
+        assert!(c.remove_layer(LayerId(999)).is_none());
+    }
+
+    #[test]
+    fn move_layer_up_swaps_with_predecessor() {
+        let mut c = Composition::new(CompId(1), "main", 10, 10);
+        c.duration_frames = 30;
+        let a = c.add_layer("a", LayerKind::Null, 0, 30);
+        let b = c.add_layer("b", LayerKind::Null, 0, 30);
+        assert_eq!(c.layers[0].id, a);
+        assert_eq!(c.layers[1].id, b);
+        assert!(c.move_layer_up(b));
+        assert_eq!(c.layers[0].id, b);
+        assert_eq!(c.layers[1].id, a);
+        // Moving the now-top layer up is a no-op.
+        assert!(!c.move_layer_up(b));
+    }
+
+    #[test]
+    fn move_layer_down_swaps_with_successor() {
+        let mut c = Composition::new(CompId(1), "main", 10, 10);
+        c.duration_frames = 30;
+        let a = c.add_layer("a", LayerKind::Null, 0, 30);
+        let b = c.add_layer("b", LayerKind::Null, 0, 30);
+        assert!(c.move_layer_down(a));
+        assert_eq!(c.layers[0].id, b);
+        assert_eq!(c.layers[1].id, a);
+        assert!(!c.move_layer_down(a));
     }
 }

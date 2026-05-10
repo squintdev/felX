@@ -1,12 +1,14 @@
 //! analog-felx GUI entry point.
 //!
 //! Hosts an eframe window, shares its wgpu device with felx-render's
-//! [`Compositor`], and shows the rendered comp in a Viewer panel.
+//! [`Compositor`], and shows the rendered comp in a Viewer panel with a
+//! Layer panel beside it.
 //!
 //! M1 scope: still frame, no playback. F-023 brings the playback loop;
-//! F-026 wires up the parameter panels; F-027 the layer panel.
+//! F-026 wires up the parameter panels.
 
 mod app;
+mod panels;
 
 use app::FelxApp;
 use eframe::NativeOptions;
