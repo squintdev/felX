@@ -9,6 +9,7 @@ use crate::effects::invert::invert_in_place;
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
+use crate::transform_pass::{TransformParams, TransformPass};
 use crate::{Renderer, RendererError};
 use felx_core::model::{CompId, Effect, Layer, LayerKind, Project};
 use image::{ImageBuffer, Rgba, RgbaImage, imageops};
@@ -158,6 +159,7 @@ pub struct Compositor {
     gain: Gain,
     cc_toner: CcToner,
     srgb_wrap: SrgbWrap,
+    transform_pass: TransformPass,
     pool: TexturePool,
     cache: FrameCache,
 }
@@ -171,11 +173,13 @@ impl Compositor {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
+        let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
             cc_toner,
             srgb_wrap,
+            transform_pass,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
         }
@@ -295,7 +299,73 @@ impl Compositor {
             current_tex = self.apply_effect(eff, current_tex, rw, rh)?;
         }
 
-        Ok(current_tex)
+        // Apply the layer's transform onto the comp canvas. v1 treats the
+        // post-effects texture as covering the comp at scale 1.0; F-040
+        // generalizes to multi-layer compositing.
+        let transformed = self.apply_transform(
+            &layer.transform,
+            current_tex,
+            comp.background,
+            scale,
+            rw,
+            rh,
+            frame,
+        );
+        Ok(transformed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_transform(
+        &mut self,
+        transform: &felx_core::model::Transform,
+        input: wgpu::Texture,
+        background: [f32; 4],
+        preview_scale: PreviewScale,
+        rw: u32,
+        rh: u32,
+        frame: u32,
+    ) -> wgpu::Texture {
+        let scale_div = preview_scale.divisor() as f32;
+        let position = transform.position.sample_at(frame);
+        let anchor = transform.anchor.sample_at(frame);
+        let scale_v = transform.scale.sample_at(frame);
+        let rotation_deg = transform.rotation.sample_at(frame);
+        let opacity = transform.opacity.sample_at(frame);
+
+        let identity = position == [0.0, 0.0]
+            && anchor == [0.0, 0.0]
+            && scale_v == [1.0, 1.0]
+            && rotation_deg == 0.0
+            && opacity == 1.0;
+        if identity {
+            return input;
+        }
+
+        let params = TransformParams::build(
+            [position[0] / scale_div, position[1] / scale_div],
+            [anchor[0] / scale_div, anchor[1] / scale_div],
+            scale_v,
+            rotation_deg,
+            opacity,
+            [rw as f32, rh as f32],
+            [rw as f32, rh as f32],
+            background,
+        );
+
+        let output = self.pool.acquire(&self.renderer, rw, rh, COMPOSITOR_FORMAT);
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.transform"),
+                });
+        self.transform_pass
+            .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        output
     }
 
     fn apply_effect(
