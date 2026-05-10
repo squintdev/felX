@@ -4,7 +4,9 @@
 use crate::Renderer;
 use bytemuck::{Pod, Zeroable};
 
-const SHADER_SRC: &str = include_str!(concat!(
+/// Embedded copy of `effects/gain/effect.wgsl` at build time. Used as the
+/// default and as the fallback when hot-reload can't find the file on disk.
+pub const EMBEDDED_SHADER_SRC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../effects/gain/effect.wgsl"
 ));
@@ -35,11 +37,42 @@ pub struct Gain {
 
 impl Gain {
     pub fn new(renderer: &Renderer, output_format: wgpu::TextureFormat) -> Self {
+        Self::with_shader(renderer, output_format, EMBEDDED_SHADER_SRC)
+    }
+
+    /// Build with a custom WGSL source (e.g. read from disk for hot-reload).
+    /// Panics if the shader fails to compile; for non-panicking compile use
+    /// [`Self::try_with_shader`].
+    pub fn with_shader(
+        renderer: &Renderer,
+        output_format: wgpu::TextureFormat,
+        wgsl: &str,
+    ) -> Self {
+        match Self::try_with_shader(renderer, output_format, wgsl) {
+            Ok(gain) => gain,
+            Err(e) => panic!("gain shader compile failed: {e}"),
+        }
+    }
+
+    /// Build with a custom WGSL source, returning the compile error on
+    /// failure. Used by hot-reload to surface errors without crashing.
+    pub fn try_with_shader(
+        renderer: &Renderer,
+        output_format: wgpu::TextureFormat,
+        wgsl: &str,
+    ) -> Result<Self, String> {
         let device = renderer.device();
+
+        // Capture validation errors from the shader compile by pushing an
+        // error scope around module creation.
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gain.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
+        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+            return Err(format!("{err}"));
+        }
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gain.bgl"),
@@ -122,13 +155,13 @@ impl Gain {
             mapped_at_creation: false,
         });
 
-        Self {
+        Ok(Self {
             pipeline,
             bind_group_layout,
             sampler,
             uniform_buffer,
             output_format,
-        }
+        })
     }
 
     pub fn output_format(&self) -> wgpu::TextureFormat {

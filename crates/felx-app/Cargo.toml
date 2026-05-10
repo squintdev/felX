@@ -19,3 +19,4 @@ tracing = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 wgpu = { workspace = true }
+notify = { workspace = true }

@@ -1,6 +1,7 @@
 //! The eframe `App` impl. Owns the project, the compositor, and the egui
 //! texture handle that mirrors the compositor's output for display.
 
+use crate::hot_reload::{HotReloadEvent, HotReloadWatcher};
 use crate::manifests::ManifestRegistry;
 use crate::panels::effects::{self, EffectsAction};
 use crate::panels::layers::{self, LayerAction};
@@ -11,8 +12,11 @@ use eframe::{App, CreationContext, Frame};
 use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
 use felx_core::model::{CompId, Effect, LayerId, Project};
 use felx_render::compositor::{Compositor, CompositorError};
+use felx_render::effects::gain::Gain;
+use felx_render::texture_io::COMPOSITOR_FORMAT;
 use felx_render::{AdapterInfo, Renderer};
-use tracing::{error, info};
+use std::path::{Path, PathBuf};
+use tracing::{error, info, warn};
 
 pub struct FelxApp {
     project: Project,
@@ -21,11 +25,18 @@ pub struct FelxApp {
     compositor: Compositor,
     selected_layer: Option<LayerId>,
     manifests: ManifestRegistry,
+    /// Filesystem watcher for `effects/<id>/effect.wgsl`. None if the
+    /// effects dir couldn't be located (running from a non-source layout).
+    hot_reload: Option<HotReloadWatcher>,
+    /// Most recent shader-compile error message, if any. Cleared on a
+    /// successful reload. Displayed as a non-fatal overlay.
+    shader_error: Option<String>,
     /// Texture currently registered with egui's wgpu renderer. Replaced
     /// every time the compositor produces a new output texture.
     egui_texture: Option<TextureId>,
     /// Set any time the compositor needs to re-render (layer or parameter
-    /// edit, scrub, playback advance). Cleared by [`ensure_frame_rendered`].
+    /// edit, scrub, playback advance, hot-reload). Cleared by
+    /// [`ensure_frame_rendered`].
     render_dirty: bool,
 }
 
@@ -60,9 +71,20 @@ impl FelxApp {
         let (project, comp_id) = default_project(&manifests);
         let comp = project.composition(comp_id).expect("comp exists");
         let playhead = Playhead::new(comp.framerate.as_fps(), comp.duration_frames);
+
+        let effects_root = effects_root_dir();
+        let hot_reload = match HotReloadWatcher::new(effects_root.clone()) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(error = %e, path = %effects_root.display(), "hot-reload disabled");
+                None
+            }
+        };
+
         info!(
             comp = comp_id.0,
             manifests = manifests.len(),
+            hot_reload = hot_reload.is_some(),
             "felx-app initialized"
         );
         Ok(Self {
@@ -72,9 +94,61 @@ impl FelxApp {
             compositor,
             selected_layer: None,
             manifests,
+            hot_reload,
+            shader_error: None,
             egui_texture: None,
             render_dirty: true,
         })
+    }
+
+    fn process_hot_reload(&mut self) {
+        let Some(watcher) = self.hot_reload.as_ref() else {
+            return;
+        };
+        let events = watcher.drain();
+        for ev in events {
+            match ev {
+                HotReloadEvent::WgslChanged { effect_id, path } => {
+                    self.reload_effect(&effect_id, &path);
+                }
+            }
+        }
+    }
+
+    fn reload_effect(&mut self, effect_id: &str, path: &Path) {
+        match effect_id {
+            "gain" => {
+                let wgsl = match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "shader read failed");
+                        return;
+                    }
+                };
+                match Gain::try_with_shader(self.compositor.renderer(), COMPOSITOR_FORMAT, &wgsl) {
+                    Ok(gain) => {
+                        self.compositor.replace_gain(gain);
+                        self.compositor.cache_mut().clear();
+                        self.render_dirty = true;
+                        self.shader_error = None;
+                        info!(effect_id, "shader reloaded");
+                    }
+                    Err(msg) => {
+                        warn!(effect_id, error = %msg, "shader compile failed");
+                        self.shader_error = Some(format!("[{effect_id}] {msg}"));
+                    }
+                }
+            }
+            "invert" => {
+                // CPU effects don't have a shader to reload. Log once per
+                // session — `notify` may also fire on save events for the
+                // manifest, so we just shrug.
+                tracing::debug!(effect_id, "ignoring hot-reload for CPU effect");
+            }
+            other => {
+                tracing::debug!(effect_id = other, "no hot-reload handler");
+            }
+        }
     }
 
     fn apply_transport_actions(&mut self, actions: Vec<TransportAction>) {
@@ -225,6 +299,8 @@ impl App for FelxApp {
         };
         let render_state = render_state.clone();
 
+        self.process_hot_reload();
+
         // Advance the playhead off real elapsed time before drawing the UI
         // so the transport bar shows the new frame.
         if self.playhead.tick() {
@@ -293,8 +369,33 @@ impl App for FelxApp {
                         );
                     });
                 }
+
+                if let Some(err) = self.shader_error.as_deref() {
+                    let overlay_rect = egui::Rect::from_two_pos(
+                        rect.left_top() + egui::vec2(8.0, 8.0),
+                        rect.right_top() + egui::vec2(-8.0, 8.0 + 64.0),
+                    );
+                    let painter = ui.painter_at(overlay_rect);
+                    painter.rect_filled(overlay_rect, 4.0, Color32::from_black_alpha(220));
+                    painter.text(
+                        overlay_rect.left_top() + egui::vec2(8.0, 6.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("⚠ shader compile error\n{err}"),
+                        egui::FontId::monospace(11.0),
+                        Color32::from_rgb(255, 180, 100),
+                    );
+                }
             });
     }
+}
+
+/// Locate the workspace `effects/` directory. CARGO_MANIFEST_DIR points at
+/// `crates/felx-app/`; the effects live two levels up.
+fn effects_root_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("effects")
 }
 
 fn build_renderer(render_state: &RenderState) -> Renderer {

@@ -145,6 +145,12 @@ impl Compositor {
         &mut self.cache
     }
 
+    /// Hot-swap the Gain pipeline. Used by the WGSL hot-reload path; the
+    /// caller is responsible for invalidating the cache afterward.
+    pub fn replace_gain(&mut self, gain: Gain) {
+        self.gain = gain;
+    }
+
     /// Render through the cache: returns a cached texture if available,
     /// otherwise renders and inserts.
     pub fn render_cached(
