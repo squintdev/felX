@@ -7,5 +7,7 @@
 //! not break projects that reference `id`.
 
 mod manifest;
+mod values;
 
 pub use manifest::*;
+pub use values::*;

@@ -171,8 +171,7 @@ impl Compositor {
     }
 
     fn cache_key(comp_id: CompId, frame: u32, layer: &Layer) -> CacheKey {
-        let stack_hash =
-            hash_effect_stack(layer.effects.iter().map(|e| (e.id.as_str(), e.enabled)));
+        let stack_hash = hash_effect_stack(layer.effects.iter());
         CacheKey::new(comp_id.0, frame, stack_hash)
     }
 
@@ -223,6 +222,7 @@ impl Compositor {
 
         match eff.id.as_str() {
             "gain" => {
+                let gain_value = eff.values.float("gain").unwrap_or(1.0);
                 let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
                 let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
                 let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
@@ -237,7 +237,7 @@ impl Compositor {
                     &mut encoder,
                     &in_view,
                     &out_view,
-                    GainParams::new(1.0),
+                    GainParams::new(gain_value),
                 );
                 self.renderer.queue().submit(Some(encoder.finish()));
 

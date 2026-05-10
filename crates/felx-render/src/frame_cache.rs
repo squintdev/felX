@@ -6,6 +6,8 @@
 //! change implicitly invalidates the affected entries — no manual
 //! invalidation API needed for the common edit-and-replay flow.
 
+use felx_core::model::Effect;
+use felx_core::params::ParamValue;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use tracing::debug;
@@ -27,19 +29,60 @@ impl CacheKey {
     }
 }
 
-/// Hash an iterator of `(effect_id, enabled)` tuples into a stable u64.
-/// Once F-026 wires up live parameter values, this should hash those too
-/// so any value change invalidates the entry.
+/// Hash a layer's effect stack — id, enabled flag, and every live
+/// parameter value — into a stable u64. Any change a user can make from
+/// the UI flips the hash, naturally invalidating the cache entry.
 pub fn hash_effect_stack<'a, I>(stack: I) -> u64
 where
-    I: IntoIterator<Item = (&'a str, bool)>,
+    I: IntoIterator<Item = &'a Effect>,
 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for (id, enabled) in stack {
-        id.hash(&mut h);
-        enabled.hash(&mut h);
+    for eff in stack {
+        eff.id.hash(&mut h);
+        eff.enabled.hash(&mut h);
+        for (id, val) in eff.values.iter() {
+            id.hash(&mut h);
+            hash_param_value(val, &mut h);
+        }
     }
     h.finish()
+}
+
+fn hash_param_value(v: &ParamValue, h: &mut impl Hasher) {
+    match v {
+        ParamValue::Float(f) => {
+            0u8.hash(h);
+            f.to_bits().hash(h);
+        }
+        ParamValue::Int(i) => {
+            1u8.hash(h);
+            i.hash(h);
+        }
+        ParamValue::Bool(b) => {
+            2u8.hash(h);
+            b.hash(h);
+        }
+        ParamValue::Color(c) => {
+            3u8.hash(h);
+            for x in c {
+                x.to_bits().hash(h);
+            }
+        }
+        ParamValue::Vec2(v) => {
+            4u8.hash(h);
+            for x in v {
+                x.to_bits().hash(h);
+            }
+        }
+        ParamValue::Enum(s) => {
+            5u8.hash(h);
+            s.hash(h);
+        }
+        ParamValue::GroupEnabled(b) => {
+            6u8.hash(h);
+            b.hash(h);
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -256,15 +299,28 @@ mod tests {
             return;
         };
         let mut cache = FrameCache::new(8);
-        let key_v1 = CacheKey::new(1, 0, hash_effect_stack([("gain", true)]));
-        let key_v2 = CacheKey::new(1, 0, hash_effect_stack([("gain", false)]));
+        let mut e_on = Effect::new("gain");
+        e_on.enabled = true;
+        let mut e_off = Effect::new("gain");
+        e_off.enabled = false;
+        let key_v1 = CacheKey::new(1, 0, hash_effect_stack(std::slice::from_ref(&e_on)));
+        let key_v2 = CacheKey::new(1, 0, hash_effect_stack(std::slice::from_ref(&e_off)));
         assert_ne!(key_v1.stack_hash, key_v2.stack_hash);
 
         cache.insert(key_v1, fake_texture(&r, "v1"));
-        // After "parameter" change (toggling enabled), the new key misses.
         assert!(cache.get(key_v2).is_none());
-        // Old entry still cached, but is logically orphaned.
         assert!(cache.get(key_v1).is_some());
+    }
+
+    #[test]
+    fn parameter_value_change_changes_stack_hash() {
+        let mut e1 = Effect::new("gain");
+        e1.values.set("gain", ParamValue::Float(1.0));
+        let mut e2 = Effect::new("gain");
+        e2.values.set("gain", ParamValue::Float(0.5));
+        let h1 = hash_effect_stack(std::slice::from_ref(&e1));
+        let h2 = hash_effect_stack(std::slice::from_ref(&e2));
+        assert_ne!(h1, h2);
     }
 
     #[test]

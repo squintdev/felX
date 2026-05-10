@@ -1,4 +1,5 @@
-//! UI panels: viewer (in app.rs), layers (this module), and forthcoming
-//! effects / timeline / render-queue panels.
+//! UI panels: viewer (in app.rs), layers, effects, and forthcoming timeline /
+//! render-queue panels.
 
+pub mod effects;
 pub mod layers;

@@ -8,6 +8,7 @@
 //! F-026 wires up the parameter panels.
 
 mod app;
+mod manifests;
 mod panels;
 
 use app::FelxApp;

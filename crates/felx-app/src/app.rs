@@ -1,6 +1,8 @@
 //! The eframe `App` impl. Owns the project, the compositor, and the egui
 //! texture handle that mirrors the compositor's output for display.
 
+use crate::manifests::ManifestRegistry;
+use crate::panels::effects::{self, EffectsAction};
 use crate::panels::layers::{self, LayerAction};
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
@@ -16,11 +18,12 @@ pub struct FelxApp {
     current_frame: u32,
     compositor: Compositor,
     selected_layer: Option<LayerId>,
+    manifests: ManifestRegistry,
     /// Texture currently registered with egui's wgpu renderer. Replaced
     /// every time the compositor produces a new output texture.
     egui_texture: Option<TextureId>,
     /// Bumped any time the compositor needs to re-render (e.g. layer add /
-    /// remove / reorder). [`ensure_frame_rendered`] watches it.
+    /// remove / reorder, parameter edit). [`ensure_frame_rendered`] watches it.
     render_dirty: bool,
 }
 
@@ -51,17 +54,61 @@ impl FelxApp {
             .ok_or(AppInitError::NoWgpuRenderState)?;
         let renderer = build_renderer(render_state);
         let compositor = Compositor::new(renderer);
-        let (project, comp_id) = default_project();
-        info!(comp = comp_id.0, "felx-app initialized");
+        let manifests = ManifestRegistry::load_builtins();
+        let (project, comp_id) = default_project(&manifests);
+        info!(
+            comp = comp_id.0,
+            manifests = manifests.len(),
+            "felx-app initialized"
+        );
         Ok(Self {
             project,
             comp_id,
             current_frame: 0,
             compositor,
             selected_layer: None,
+            manifests,
             egui_texture: None,
             render_dirty: true,
         })
+    }
+
+    fn apply_effects_actions(&mut self, actions: Vec<EffectsAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        let Some(layer_id) = self.selected_layer else {
+            return;
+        };
+        let Some(comp) = self.project.composition_mut(self.comp_id) else {
+            return;
+        };
+        let Some(layer) = comp.layer_mut(layer_id) else {
+            return;
+        };
+        for action in actions {
+            match action {
+                EffectsAction::SetValue {
+                    effect_index,
+                    id,
+                    value,
+                } => {
+                    if let Some(eff) = layer.effects.get_mut(effect_index) {
+                        eff.values.set(id, value);
+                    }
+                }
+                EffectsAction::ToggleEnabled {
+                    effect_index,
+                    enabled,
+                } => {
+                    if let Some(eff) = layer.effects.get_mut(effect_index) {
+                        eff.enabled = enabled;
+                    }
+                }
+            }
+        }
+        self.render_dirty = true;
+        self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
     }
 
     fn apply_layer_actions(&mut self, actions: Vec<LayerAction>) {
@@ -147,7 +194,7 @@ impl App for FelxApp {
         };
         let render_state = render_state.clone();
 
-        let actions = SidePanel::left("layers")
+        let layer_actions = SidePanel::left("layers")
             .resizable(true)
             .default_width(220.0)
             .min_width(180.0)
@@ -156,7 +203,21 @@ impl App for FelxApp {
                 layers::show(ui, comp, self.selected_layer)
             })
             .inner;
-        self.apply_layer_actions(actions);
+        self.apply_layer_actions(layer_actions);
+
+        let effects_actions = SidePanel::right("effects")
+            .resizable(true)
+            .default_width(280.0)
+            .min_width(220.0)
+            .show(ctx, |ui| {
+                let comp = self.project.composition(self.comp_id).expect("comp exists");
+                let selected_layer = self
+                    .selected_layer
+                    .and_then(|id| comp.layers.iter().find(|l| l.id == id));
+                effects::show(ui, &self.manifests, selected_layer)
+            })
+            .inner;
+        self.apply_effects_actions(effects_actions);
 
         self.ensure_frame_rendered(&render_state);
 
@@ -199,15 +260,20 @@ fn build_renderer(render_state: &RenderState) -> Renderer {
 }
 
 /// Default placeholder project until file-open lands. A 1280x720 / 30fps
-/// comp with a slate-blue solid layer.
-fn default_project() -> (Project, CompId) {
+/// comp with a slate-blue solid layer and a Gain effect (defaulted from
+/// the manifest if loaded, otherwise the bare `Effect::new` default).
+fn default_project(manifests: &ManifestRegistry) -> (Project, CompId) {
     let mut project = Project::new();
     let comp_id = project.add_composition("preview", 1280, 720);
     let comp = project.composition_mut(comp_id).unwrap();
     comp.duration_frames = 600;
     comp.background = [0.0, 0.0, 0.0, 1.0];
     let layer = comp.add_solid("background", [0.18, 0.22, 0.32, 1.0]);
-    comp.push_effect(layer, Effect::new("gain"));
+    let gain_effect = manifests
+        .get("gain")
+        .map(Effect::from_manifest)
+        .unwrap_or_else(|| Effect::new("gain"));
+    comp.push_effect(layer, gain_effect);
     (project, comp_id)
 }
 
