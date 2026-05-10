@@ -1,0 +1,24 @@
+analog-felx — Third-Party Notices
+==================================
+
+This file lists third-party software incorporated into analog-felx and the
+licenses under which that software is distributed. Add an entry below when
+introducing a new dependency or shader technique that requires attribution.
+
+analog-felx itself is dual-licensed under the MIT License and the Apache
+License, Version 2.0. See LICENSE-MIT and LICENSE-APACHE.
+
+----------------------------------------------------------------------------
+
+Format
+------
+
+For each entry: project name, license, the upstream copyright/author notice
+verbatim, and the project URL.
+
+----------------------------------------------------------------------------
+
+Entries
+-------
+
+(none yet — this file is populated as dependencies and references are added.)

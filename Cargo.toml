@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/felx-core",
+    "crates/felx-render",
+    "crates/felx-cli",
+    "crates/felx-app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["SquintDev <thomas.edward.duffy@gmail.com>"]
+
+[workspace.dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

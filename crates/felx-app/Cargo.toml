@@ -1,0 +1,17 @@
+[package]
+name = "felx-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "GUI application for analog-felx (timeline, viewer, effects, render queue)."
+publish = false
+
+[[bin]]
+name = "felx-app"
+path = "src/main.rs"
+
+[dependencies]
+felx-core = { path = "../felx-core" }
+felx-render = { path = "../felx-render" }

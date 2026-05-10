@@ -1,0 +1,11 @@
+[package]
+name = "felx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core domain model for analog-felx (project, composition, layer, time, parameters)."
+publish = false
+
+[dependencies]
