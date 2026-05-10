@@ -56,6 +56,7 @@ impl Composition {
             transform: Transform::default(),
             effects: Vec::new(),
             parent: None,
+            blend_mode: crate::model::BlendMode::default(),
         });
         id
     }

@@ -7,8 +7,6 @@ use bytemuck::{Pod, Zeroable};
 
 const SHADER: &str = r#"
 struct Params {
-    /// Blend mode index. 0 = Normal (the only mode in F-040; F-042 grows
-    /// this to the full enum).
     mode: u32,
     opacity: f32,
     _pad0: f32,
@@ -36,19 +34,80 @@ fn vs(@builtin(vertex_index) idx: u32) -> VsOut {
     return out;
 }
 
+fn overlay_channel(b: f32, f: f32) -> f32 {
+    if b < 0.5 { return 2.0 * b * f; }
+    return 1.0 - 2.0 * (1.0 - b) * (1.0 - f);
+}
+fn hard_light_channel(b: f32, f: f32) -> f32 {
+    if f < 0.5 { return 2.0 * b * f; }
+    return 1.0 - 2.0 * (1.0 - b) * (1.0 - f);
+}
+fn color_dodge_channel(b: f32, f: f32) -> f32 {
+    if f >= 1.0 { return 1.0; }
+    return min(1.0, b / (1.0 - f));
+}
+fn color_burn_channel(b: f32, f: f32) -> f32 {
+    if f <= 0.0 { return 0.0; }
+    return 1.0 - min(1.0, (1.0 - b) / f);
+}
+
+fn blend_color(mode: u32, b: vec3<f32>, f: vec3<f32>) -> vec3<f32> {
+    switch mode {
+        case 0u: { return f; }
+        case 1u: { return min(b + f, vec3(1.0)); }
+        case 2u: { return b * f; }
+        case 3u: { return 1.0 - (1.0 - b) * (1.0 - f); }
+        case 4u: {
+            return vec3(
+                overlay_channel(b.r, f.r),
+                overlay_channel(b.g, f.g),
+                overlay_channel(b.b, f.b),
+            );
+        }
+        case 5u: {
+            return vec3(
+                hard_light_channel(b.r, f.r),
+                hard_light_channel(b.g, f.g),
+                hard_light_channel(b.b, f.b),
+            );
+        }
+        case 6u: { return max(b, f); }
+        case 7u: { return min(b, f); }
+        case 8u: { return abs(b - f); }
+        case 9u: { return b + f - 2.0 * b * f; }
+        case 10u: {
+            return vec3(
+                color_dodge_channel(b.r, f.r),
+                color_dodge_channel(b.g, f.g),
+                color_dodge_channel(b.b, f.b),
+            );
+        }
+        case 11u: {
+            return vec3(
+                color_burn_channel(b.r, f.r),
+                color_burn_channel(b.g, f.g),
+                color_burn_channel(b.b, f.b),
+            );
+        }
+        case 12u: { return max(b + f - 1.0, vec3(0.0)); }
+        default: { return f; }
+    }
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let bg = textureSample(bg_tex, bg_smp, in.uv);
     var fg = textureSample(fg_tex, fg_smp, in.uv);
     fg = fg * params.opacity;
-    // Normal alpha-over: out_rgb = fg_rgb + bg_rgb * (1 - fg_a),
-    //                   out_a   = fg_a + bg_a * (1 - fg_a).
-    // (fg is already premultiplied since the texture_io upload path is
-    // straight RGBA but each effect re-premultiplies on output.)
+
+    let bg_rgb = bg.rgb / max(bg.a, 1e-6);
+    let fg_rgb = fg.rgb / max(fg.a, 1e-6);
+    let blended = blend_color(params.mode, bg_rgb, fg_rgb);
+
     let one_minus_fa = 1.0 - fg.a;
-    let rgb = fg.rgb + bg.rgb * one_minus_fa;
-    let a = fg.a + bg.a * one_minus_fa;
-    return vec4(rgb, a);
+    let out_a = fg.a + bg.a * one_minus_fa;
+    let out_rgb = blended * fg.a + bg_rgb * bg.a * one_minus_fa;
+    return vec4(out_rgb, out_a);
 }
 "#;
 
@@ -63,8 +122,12 @@ pub struct BlendParams {
 
 impl BlendParams {
     pub fn normal(opacity: f32) -> Self {
+        Self::with_mode(0, opacity)
+    }
+
+    pub fn with_mode(mode: u32, opacity: f32) -> Self {
         Self {
-            mode: 0,
+            mode,
             opacity,
             _pad0: 0.0,
             _pad1: 0.0,

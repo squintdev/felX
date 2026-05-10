@@ -317,7 +317,8 @@ impl Compositor {
         for layer in visible {
             let layer_tex =
                 self.render_layer(project, layer, comp.background, scale, rw, rh, frame)?;
-            accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0);
+            let mode = layer.blend_mode.shader_index();
+            accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0, mode);
         }
 
         Ok(accumulator)
@@ -364,6 +365,7 @@ impl Compositor {
         Ok(transformed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn blend_layer_onto(
         &mut self,
         accumulator: wgpu::Texture,
@@ -371,6 +373,7 @@ impl Compositor {
         rw: u32,
         rh: u32,
         opacity: f32,
+        mode: u32,
     ) -> wgpu::Texture {
         let output = self.pool.acquire(&self.renderer, rw, rh, COMPOSITOR_FORMAT);
         let acc_view = accumulator.create_view(&wgpu::TextureViewDescriptor::default());
@@ -388,7 +391,7 @@ impl Compositor {
             &acc_view,
             &layer_view,
             &out_view,
-            BlendParams::normal(opacity),
+            BlendParams::with_mode(mode, opacity),
         );
         self.renderer.queue().submit(Some(cmd.finish()));
         self.pool.release(accumulator);
