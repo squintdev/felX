@@ -5,9 +5,10 @@
 use crate::cpu_pass::run_cpu_pass;
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
+use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::{Renderer, RendererError};
-use felx_core::model::{CompId, Effect, LayerKind, Project};
+use felx_core::model::{CompId, Effect, Layer, LayerKind, Project};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use tracing::{debug, debug_span, info_span, warn};
 
@@ -110,15 +111,21 @@ pub struct Compositor {
     renderer: Renderer,
     gain: Gain,
     pool: TexturePool,
+    cache: FrameCache,
 }
 
 impl Compositor {
     pub fn new(renderer: Renderer) -> Self {
+        Self::with_cache_capacity(renderer, 64)
+    }
+
+    pub fn with_cache_capacity(renderer: Renderer, cache_entries: usize) -> Self {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
             pool: TexturePool::new("compositor-pool"),
+            cache: FrameCache::new(cache_entries),
         }
     }
 
@@ -128,6 +135,45 @@ impl Compositor {
 
     pub fn pool(&self) -> &TexturePool {
         &self.pool
+    }
+
+    pub fn cache(&self) -> &FrameCache {
+        &self.cache
+    }
+
+    pub fn cache_mut(&mut self) -> &mut FrameCache {
+        &mut self.cache
+    }
+
+    /// Render through the cache: returns a cached texture if available,
+    /// otherwise renders and inserts.
+    pub fn render_cached(
+        &mut self,
+        project: &Project,
+        comp_id: CompId,
+        frame: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let comp = project
+            .composition(comp_id)
+            .ok_or(CompositorError::UnknownComposition)?;
+        let layer = comp
+            .layers
+            .iter()
+            .find(|l| frame >= l.in_frame && frame < l.out_frame)
+            .ok_or(CompositorError::NoVisibleLayer)?;
+        let key = Self::cache_key(comp_id, frame, layer);
+        if let Some(tex) = self.cache.get(key) {
+            return Ok(tex);
+        }
+        let tex = self.render(project, comp_id, frame)?;
+        self.cache.insert(key, tex.clone());
+        Ok(tex)
+    }
+
+    fn cache_key(comp_id: CompId, frame: u32, layer: &Layer) -> CacheKey {
+        let stack_hash =
+            hash_effect_stack(layer.effects.iter().map(|e| (e.id.as_str(), e.enabled)));
+        CacheKey::new(comp_id.0, frame, stack_hash)
     }
 
     /// Render the first layer of the named composition that's visible at
