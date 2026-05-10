@@ -66,6 +66,11 @@ impl PreviewScale {
     }
 }
 
+/// Hard cap on how deep pre-comp nesting can go before we bail out.
+/// Eight feels like more than anyone realistically needs and keeps the
+/// recursive call stack bounded.
+const MAX_PRECOMP_DEPTH: usize = 8;
+
 #[derive(Debug)]
 pub enum CompositorError {
     UnknownComposition,
@@ -75,6 +80,9 @@ pub enum CompositorError {
     AssetIo(std::io::Error),
     AssetDecode(image::ImageError),
     RendererInit(RendererError),
+    /// Pre-comp graph contains a cycle (A nests B nests A …) or exceeds
+    /// [`MAX_PRECOMP_DEPTH`].
+    PrecompCycle(u32),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -87,6 +95,9 @@ impl std::fmt::Display for CompositorError {
             CompositorError::AssetIo(e) => write!(f, "asset io: {e}"),
             CompositorError::AssetDecode(e) => write!(f, "asset decode: {e}"),
             CompositorError::RendererInit(e) => write!(f, "renderer init: {e}"),
+            CompositorError::PrecompCycle(c) => {
+                write!(f, "pre-comp cycle or depth-limit hit at comp {c}")
+            }
         }
     }
 }
@@ -298,6 +309,22 @@ impl Compositor {
         frame: u32,
         scale: PreviewScale,
     ) -> Result<wgpu::Texture, CompositorError> {
+        let mut visiting: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        self.render_at_inner(project, comp_id, frame, scale, &mut visiting)
+    }
+
+    fn render_at_inner(
+        &mut self,
+        project: &Project,
+        comp_id: CompId,
+        frame: u32,
+        scale: PreviewScale,
+        visiting: &mut std::collections::HashSet<u32>,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        if !visiting.insert(comp_id.0) || visiting.len() > MAX_PRECOMP_DEPTH {
+            return Err(CompositorError::PrecompCycle(comp_id.0));
+        }
+
         let _span = info_span!(
             "compositor.render",
             frame,
@@ -360,6 +387,7 @@ impl Compositor {
                 rh,
                 frame,
                 framerate,
+                visiting,
             )?;
 
             if let Some(mode) = layer.track_matte
@@ -375,6 +403,7 @@ impl Compositor {
                     rh,
                     frame,
                     framerate,
+                    visiting,
                 )?;
                 layer_tex = self.apply_matte(layer_tex, source_tex, rw, rh, mode.shader_index());
             }
@@ -383,6 +412,7 @@ impl Compositor {
             accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0, blend_mode);
         }
 
+        visiting.remove(&comp_id.0);
         Ok(accumulator)
     }
 
@@ -429,12 +459,23 @@ impl Compositor {
         rh: u32,
         frame: u32,
         framerate: Framerate,
+        visiting: &mut std::collections::HashSet<u32>,
     ) -> Result<wgpu::Texture, CompositorError> {
-        let source_image = {
-            let _s = debug_span!("compositor.resolve_source", layer = layer.id.0).entered();
-            self.resolve_layer_source(project, &layer.kind, rw, rh)?
+        let mut current_tex = if let LayerKind::Composition { comp: inner_id } = &layer.kind {
+            // Pre-comp: render the inner comp recursively, then resize its
+            // output to the outer's render dims via a CPU readback. The
+            // GPU-direct blit-resize is a follow-up; this keeps the v1
+            // path simple and correctness-focused.
+            let _s = debug_span!("compositor.precomp", inner = inner_id.0).entered();
+            let inner_tex = self.render_at_inner(project, *inner_id, frame, scale, visiting)?;
+            self.resize_to(inner_tex, rw, rh)
+        } else {
+            let source_image = {
+                let _s = debug_span!("compositor.resolve_source", layer = layer.id.0).entered();
+                self.resolve_layer_source(project, &layer.kind, rw, rh)?
+            };
+            upload_image(&self.renderer, &source_image)
         };
-        let mut current_tex = upload_image(&self.renderer, &source_image);
 
         let time = Frame(frame).to_time(framerate);
         for eff in &layer.effects {
@@ -805,6 +846,18 @@ impl Compositor {
         self.pool.release(encoded);
         self.pool.release(toned);
         Ok(decoded)
+    }
+
+    /// CPU-readback resize. Used by the pre-comp path to fit the inner
+    /// comp's render output into the outer's render dims. A GPU-direct
+    /// blit-resize is a perf follow-up; functional correctness first.
+    fn resize_to(&mut self, input: wgpu::Texture, w: u32, h: u32) -> wgpu::Texture {
+        if input.width() == w && input.height() == h {
+            return input;
+        }
+        let img = crate::texture_io::download_image(&self.renderer, &input);
+        let resized = imageops::resize(&img, w, h, imageops::FilterType::Triangle);
+        upload_image(&self.renderer, &resized)
     }
 
     fn resolve_layer_source(
