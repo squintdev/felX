@@ -124,6 +124,38 @@ pub struct Layer {
     /// How this layer composites onto everything below it.
     #[serde(default)]
     pub blend_mode: BlendMode,
+    /// Use the layer immediately above this one in the stack as a track
+    /// matte (gating alpha source). The source layer becomes invisible.
+    #[serde(default)]
+    pub track_matte: Option<TrackMatteMode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackMatteMode {
+    Alpha,
+    AlphaInverted,
+    Luma,
+    LumaInverted,
+}
+
+impl TrackMatteMode {
+    pub fn shader_index(self) -> u32 {
+        match self {
+            TrackMatteMode::Alpha => 0,
+            TrackMatteMode::AlphaInverted => 1,
+            TrackMatteMode::Luma => 2,
+            TrackMatteMode::LumaInverted => 3,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackMatteMode::Alpha => "Alpha",
+            TrackMatteMode::AlphaInverted => "Alpha Inverted",
+            TrackMatteMode::Luma => "Luma",
+            TrackMatteMode::LumaInverted => "Luma Inverted",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -162,6 +194,7 @@ mod tests {
             effects: vec![],
             parent: None,
             blend_mode: BlendMode::default(),
+            track_matte: None,
         };
         assert_eq!(l.duration(), 60);
     }
@@ -178,6 +211,7 @@ mod tests {
             effects: vec![],
             parent: None,
             blend_mode: BlendMode::default(),
+            track_matte: None,
         };
         assert_eq!(l.duration(), 0);
     }

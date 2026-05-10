@@ -11,6 +11,7 @@ pub mod compositor;
 pub mod cpu_pass;
 pub mod effects;
 pub mod frame_cache;
+pub mod matte_pass;
 mod renderer;
 pub mod srgb_wrap;
 pub mod texture_io;

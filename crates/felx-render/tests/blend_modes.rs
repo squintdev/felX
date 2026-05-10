@@ -62,11 +62,7 @@ fn add_red_and_green_is_yellow() {
     let Some(r) = try_renderer() else {
         return;
     };
-    let (p, c) = two_solid_comp(
-        [1.0, 0.0, 0.0, 1.0],
-        [0.0, 1.0, 0.0, 1.0],
-        BlendMode::Add,
-    );
+    let (p, c) = two_solid_comp([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], BlendMode::Add);
     let pixel = pixel_at_frame(&p, c, r);
     assert!(pixel[0] >= 250 && pixel[1] >= 250);
 }

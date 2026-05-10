@@ -9,6 +9,7 @@ use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
+use crate::matte_pass::{MatteParams, MattePass};
 use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::transform_pass::{TransformParams, TransformPass};
@@ -163,6 +164,7 @@ pub struct Compositor {
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
     blend_pass: BlendPass,
+    matte_pass: MattePass,
     pool: TexturePool,
     cache: FrameCache,
 }
@@ -178,6 +180,7 @@ impl Compositor {
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
+        let matte_pass = MattePass::new(&renderer, COMPOSITOR_FORMAT);
         Self {
             renderer,
             gain,
@@ -185,6 +188,7 @@ impl Compositor {
             srgb_wrap,
             transform_pass,
             blend_pass,
+            matte_pass,
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
         }
@@ -302,6 +306,21 @@ impl Compositor {
             return Err(CompositorError::NoVisibleLayer);
         }
 
+        // Compute the indices into `visible` that are matte sources for the
+        // layer immediately *below* them. Those layers contribute their
+        // gating but are not blended onto the accumulator on their own.
+        let matte_source_indices: std::collections::HashSet<usize> = visible
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if l.track_matte.is_some() && i + 1 < visible.len() {
+                    Some(i + 1)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let (rw, rh) = scale.scale_dims(comp.width, comp.height);
 
         // Initialize accumulator with the comp's background color via a
@@ -314,14 +333,66 @@ impl Compositor {
             comp.background,
         );
 
-        for layer in visible {
-            let layer_tex =
+        for (idx, layer) in visible.iter().enumerate() {
+            if matte_source_indices.contains(&idx) {
+                continue;
+            }
+            let mut layer_tex =
                 self.render_layer(project, layer, comp.background, scale, rw, rh, frame)?;
-            let mode = layer.blend_mode.shader_index();
-            accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0, mode);
+
+            if let Some(mode) = layer.track_matte
+                && idx + 1 < visible.len()
+            {
+                let source_layer = visible[idx + 1];
+                let source_tex = self.render_layer(
+                    project,
+                    source_layer,
+                    comp.background,
+                    scale,
+                    rw,
+                    rh,
+                    frame,
+                )?;
+                layer_tex = self.apply_matte(layer_tex, source_tex, rw, rh, mode.shader_index());
+            }
+
+            let blend_mode = layer.blend_mode.shader_index();
+            accumulator = self.blend_layer_onto(accumulator, layer_tex, rw, rh, 1.0, blend_mode);
         }
 
         Ok(accumulator)
+    }
+
+    fn apply_matte(
+        &mut self,
+        target: wgpu::Texture,
+        source: wgpu::Texture,
+        rw: u32,
+        rh: u32,
+        mode: u32,
+    ) -> wgpu::Texture {
+        let output = self.pool.acquire(&self.renderer, rw, rh, COMPOSITOR_FORMAT);
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.matte"),
+                });
+        self.matte_pass.render(
+            &self.renderer,
+            &mut cmd,
+            &target_view,
+            &source_view,
+            &out_view,
+            MatteParams::new(mode),
+        );
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(target);
+        self.pool.release(source);
+        output
     }
 
     #[allow(clippy::too_many_arguments)]

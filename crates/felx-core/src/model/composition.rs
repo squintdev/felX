@@ -57,6 +57,7 @@ impl Composition {
             effects: Vec::new(),
             parent: None,
             blend_mode: crate::model::BlendMode::default(),
+            track_matte: None,
         });
         id
     }
