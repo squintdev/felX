@@ -1,3 +1,4 @@
 fn main() {
-    println!("felx-app {}", env!("CARGO_PKG_VERSION"));
+    felx_core::diagnostics::init_tracing();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "felx-app starting");
 }

@@ -9,3 +9,5 @@ description = "Core domain model for analog-felx (project, composition, layer, t
 publish = false
 
 [dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
