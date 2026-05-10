@@ -1,0 +1,27 @@
+// Signal — analog video signal emulation. v1: chroma blur + ringing + snow
+// + head-switching band. The full ntsc-rs adapter (CPU pass over the
+// `ntscrs` crate, exposing the entire NtscEffect parameter set) lands as a
+// follow-up that adds the rest of the artifact set.
+(
+    id: "signal",
+    display_name: "Signal",
+    category: "Stylize",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (id: "chroma_blur", display_name: "Chroma Blur",
+         kind: Float(default: 0.4, range: (min: 0.0, max: 1.0))),
+        (id: "ringing_intensity", display_name: "Ringing",
+         kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
+        (id: "snow_intensity", display_name: "Snow",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+        (id: "composite_noise", display_name: "Composite Noise",
+         kind: Float(default: 0.1, range: (min: 0.0, max: 1.0))),
+        (id: "head_switch_height", display_name: "Head Switch Height",
+         kind: Float(default: 8.0, range: (min: 0.0, max: 64.0))),
+        (id: "head_switch_shift", display_name: "Head Switch Shift",
+         kind: Float(default: 4.0, range: (min: 0.0, max: 32.0))),
+        (id: "seed", display_name: "Seed",
+         kind: Int(default: 0, range: (min: 0, max: 1000000))),
+    ],
+)

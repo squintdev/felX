@@ -8,6 +8,7 @@ use crate::cpu_pass::run_cpu_pass;
 use crate::effects::cc_toner::{CcToner, CcTonerParams, TonesMode};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
+use crate::effects::signal::{Signal, SignalParams};
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::matte_pass::{MatteParams, MattePass};
 use crate::srgb_wrap::SrgbWrap;
@@ -161,6 +162,7 @@ pub struct Compositor {
     renderer: Renderer,
     gain: Gain,
     cc_toner: CcToner,
+    signal: Signal,
     srgb_wrap: SrgbWrap,
     transform_pass: TransformPass,
     blend_pass: BlendPass,
@@ -177,6 +179,7 @@ impl Compositor {
     pub fn with_cache_capacity(renderer: Renderer, cache_entries: usize) -> Self {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
+        let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
         let srgb_wrap = SrgbWrap::new(&renderer, COMPOSITOR_FORMAT);
         let transform_pass = TransformPass::new(&renderer, COMPOSITOR_FORMAT);
         let blend_pass = BlendPass::new(&renderer, COMPOSITOR_FORMAT);
@@ -185,6 +188,7 @@ impl Compositor {
             renderer,
             gain,
             cc_toner,
+            signal,
             srgb_wrap,
             transform_pass,
             blend_pass,
@@ -563,11 +567,53 @@ impl Compositor {
                 Ok(output)
             }
             "cc_toner" => self.apply_cc_toner(eff, input, w, h),
+            "signal" => self.apply_signal(eff, input, w, h),
             other => {
                 warn!(effect_id = other, "skipping unknown effect");
                 Ok(input)
             }
         }
+    }
+
+    fn apply_signal(
+        &mut self,
+        eff: &Effect,
+        input: wgpu::Texture,
+        w: u32,
+        h: u32,
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let chroma_blur = eff.values.float("chroma_blur").unwrap_or(0.4);
+        let ringing = eff.values.float("ringing_intensity").unwrap_or(0.5);
+        let snow = eff.values.float("snow_intensity").unwrap_or(0.0);
+        let composite_noise = eff.values.float("composite_noise").unwrap_or(0.1);
+        let head_h = eff.values.float("head_switch_height").unwrap_or(8.0);
+        let head_shift = eff.values.float("head_switch_shift").unwrap_or(4.0);
+        let seed = eff.values.int("seed").unwrap_or(0) as f32;
+        let params = SignalParams::new(
+            chroma_blur,
+            ringing,
+            snow,
+            composite_noise,
+            head_h,
+            head_shift,
+            seed,
+            [w as f32, h as f32],
+        );
+
+        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
+        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut cmd =
+            self.renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor.signal"),
+                });
+        self.signal
+            .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
+        self.renderer.queue().submit(Some(cmd.finish()));
+        self.pool.release(input);
+        Ok(output)
     }
 
     fn apply_cc_toner(
