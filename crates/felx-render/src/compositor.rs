@@ -22,8 +22,12 @@ use crate::srgb_wrap::SrgbWrap;
 use crate::texture_io::{COMPOSITOR_FORMAT, upload_image};
 use crate::transform_pass::{TransformParams, TransformPass};
 use crate::{Renderer, RendererError};
-use felx_core::model::{CompId, Effect, Frame, Framerate, Layer, LayerKind, Project};
+use felx_core::model::{CompId, Effect, Frame, Framerate, Layer, LayerId, LayerKind, Project};
+use felx_media::{FfmpegDecoder, HwaccelKind, VideoDecoder};
 use image::{ImageBuffer, Rgba, RgbaImage, imageops};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{debug, debug_span, info_span, warn};
 
 /// Preview-resolution scale factor. Renders at `comp_dims / scale_div` in
@@ -87,6 +91,7 @@ pub enum CompositorError {
     /// Pre-comp graph contains a cycle (A nests B nests A …) or exceeds
     /// [`MAX_PRECOMP_DEPTH`].
     PrecompCycle(u32),
+    VideoDecode(felx_media::DecodeError),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -102,8 +107,21 @@ impl std::fmt::Display for CompositorError {
             CompositorError::PrecompCycle(c) => {
                 write!(f, "pre-comp cycle or depth-limit hit at comp {c}")
             }
+            CompositorError::VideoDecode(e) => write!(f, "video decode: {e}"),
         }
     }
+}
+
+fn maybe_resize(img: RgbaImage, w: u32, h: u32) -> RgbaImage {
+    if img.width() == w && img.height() == h {
+        img
+    } else {
+        imageops::resize(&img, w, h, imageops::FilterType::Triangle)
+    }
+}
+
+fn ffmpeg_error_invalid_data() -> ffmpeg_next::Error {
+    ffmpeg_next::Error::InvalidData
 }
 
 impl std::error::Error for CompositorError {}
@@ -195,6 +213,22 @@ pub struct Compositor {
     /// Per-effect-instance frame-to-frame state (F-070). Holds ping-pong
     /// textures for stateful effects like CRT phosphor persistence.
     state: EffectStateRegistry,
+    /// Per-(asset path, layer id) video decoder cache. Each Video layer
+    /// instance owns its own decoder so concurrent layers don't trample
+    /// each other's seek state. Monotonic playback hits the fast path
+    /// (decode_next); seeks happen only on scrub or out-of-order frames.
+    video_cache: HashMap<(PathBuf, LayerId), VideoDecoderEntry>,
+}
+
+struct VideoDecoderEntry {
+    decoder: FfmpegDecoder,
+    fps: f64,
+    /// Last source-frame index successfully emitted, if any.
+    last_frame: Option<u32>,
+    /// Last decoded image, kept around so a repeat-frame request (paused
+    /// playhead, multiple effects asking for the same source frame) is
+    /// free.
+    last_image: Option<RgbaImage>,
 }
 
 impl Compositor {
@@ -232,6 +266,7 @@ impl Compositor {
             pool: TexturePool::new("compositor-pool"),
             cache: FrameCache::new(cache_entries),
             state: EffectStateRegistry::new(),
+            video_cache: HashMap::new(),
         }
     }
 
@@ -513,6 +548,14 @@ impl Compositor {
             let bounded = source_frame.min(max_frame);
             let inner_tex = self.render_at_inner(project, *inner_id, bounded, scale, visiting)?;
             self.resize_to(inner_tex, rw, rh)
+        } else if matches!(layer.kind, LayerKind::Video { .. }) {
+            // Video: per-(asset, layer) decoder cache, monotonic-playback
+            // fast path, seek-and-walk on out-of-order frames, resize to
+            // comp dims.
+            let _s = debug_span!("compositor.video", layer = layer.id.0).entered();
+            let source_frame = layer.source_frame_for(frame);
+            let img = self.resolve_video_frame(project, layer, source_frame, rw, rh)?;
+            upload_image(&self.renderer, &img)
         } else {
             let source_image = {
                 let _s = debug_span!("compositor.resolve_source", layer = layer.id.0).entered();
@@ -1150,6 +1193,104 @@ impl Compositor {
             )?;
         }
         Ok(current)
+    }
+
+    /// Resolve one source frame from a Video layer's referenced asset.
+    ///
+    /// Strategy: cache one [`FfmpegDecoder`] per (asset path, layer id) so
+    /// concurrent Video layers don't trample each other's seek state.
+    /// Monotonic playback (request frame N, then N+1, …) hits the fast
+    /// path of just calling `next_frame`. Out-of-order or large jumps
+    /// re-seek and walk forward to the requested frame. Repeat-frame
+    /// requests (paused playhead, multiple effects on the same layer) are
+    /// served from a one-frame image cache so we don't re-decode.
+    fn resolve_video_frame(
+        &mut self,
+        project: &Project,
+        layer: &Layer,
+        source_frame: u32,
+        comp_w: u32,
+        comp_h: u32,
+    ) -> Result<RgbaImage, CompositorError> {
+        let asset_id = match layer.kind {
+            LayerKind::Video { asset } => asset,
+            _ => return Err(CompositorError::UnsupportedLayerKind("Video")),
+        };
+        let asset = project
+            .asset(asset_id)
+            .ok_or(CompositorError::UnknownAsset)?;
+        let key = (asset.path.clone(), layer.id);
+
+        // Open on first use.
+        if !self.video_cache.contains_key(&key) {
+            let decoder = FfmpegDecoder::open(&asset.path, HwaccelKind::Auto)
+                .map_err(CompositorError::VideoDecode)?;
+            let fps = decoder.fps().max(1.0);
+            self.video_cache.insert(
+                key.clone(),
+                VideoDecoderEntry {
+                    decoder,
+                    fps,
+                    last_frame: None,
+                    last_image: None,
+                },
+            );
+        }
+        let entry = self.video_cache.get_mut(&key).expect("just inserted");
+
+        // Repeat-frame fast path.
+        if entry.last_frame == Some(source_frame)
+            && let Some(img) = &entry.last_image
+        {
+            return Ok(maybe_resize(img.clone(), comp_w, comp_h));
+        }
+
+        // Decide whether to seek. Seek if there is no last frame, the
+        // request goes backward, or it skips forward by more than one.
+        let needs_seek = match entry.last_frame {
+            None => true,
+            Some(prev) => source_frame < prev || source_frame.saturating_sub(prev) > 1,
+        };
+        if needs_seek {
+            let target = Duration::from_secs_f64(source_frame as f64 / entry.fps);
+            entry
+                .decoder
+                .seek(target)
+                .map_err(CompositorError::VideoDecode)?;
+            entry.last_frame = None;
+            entry.last_image = None;
+        }
+
+        // Walk forward to the requested frame.
+        let mut latest: Option<RgbaImage> = None;
+        loop {
+            let dec = entry
+                .decoder
+                .next_frame()
+                .map_err(CompositorError::VideoDecode)?;
+            let Some(frame) = dec else {
+                // EOF before reaching the requested frame — return the
+                // most-recent decoded frame, or a transparent buffer if
+                // we never got one. Honest fallback for over-length comps.
+                let img = latest
+                    .unwrap_or_else(|| ImageBuffer::from_pixel(comp_w, comp_h, Rgba([0, 0, 0, 0])));
+                entry.last_image = Some(img.clone());
+                return Ok(maybe_resize(img, comp_w, comp_h));
+            };
+            let frame_idx = (frame.pts.as_secs_f64() * entry.fps).round().max(0.0) as u32;
+            let img = ImageBuffer::from_raw(frame.width, frame.height, frame.rgba).ok_or(
+                CompositorError::VideoDecode(felx_media::DecodeError::Ffmpeg(
+                    ffmpeg_error_invalid_data(),
+                )),
+            )?;
+            latest = Some(img);
+            if frame_idx >= source_frame {
+                let img = latest.expect("just assigned");
+                entry.last_frame = Some(frame_idx);
+                entry.last_image = Some(img.clone());
+                return Ok(maybe_resize(img, comp_w, comp_h));
+            }
+        }
     }
 
     /// CPU-readback resize. Used by the pre-comp path to fit the inner

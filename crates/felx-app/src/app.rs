@@ -13,7 +13,7 @@ use crate::presets::PresetRegistry;
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
 use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
-use felx_core::model::{CompId, Effect, Frame as FelxFrame, LayerId, Project};
+use felx_core::model::{AssetKind, CompId, Effect, Frame as FelxFrame, LayerId, Project};
 use felx_render::compositor::{Compositor, CompositorError, PreviewScale};
 use felx_render::effects::gain::Gain;
 use felx_render::texture_io::COMPOSITOR_FORMAT;
@@ -61,6 +61,9 @@ pub struct FelxApp {
     /// Help window: which effect's README is currently displayed (None =
     /// help window closed).
     help_open_for: Option<String>,
+    /// Path of the .felx file the project came from, if any. `None` means
+    /// the in-memory default project — Save behaves like Save As.
+    current_project_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -151,7 +154,108 @@ impl FelxApp {
             region_drag_anchor: None,
             pen: PenState::default(),
             help_open_for: None,
+            current_project_path: None,
         })
+    }
+
+    /// Open a file dialog and import a media file as a new layer of the
+    /// matching kind. The asset is registered against the project, then a
+    /// layer is added to the current comp with sensible defaults: full
+    /// duration for image/video, comp-aligned in/out for audio.
+    fn import_media(&mut self, kind: AssetKind) {
+        let dialog = match kind {
+            AssetKind::Image => rfd::FileDialog::new()
+                .add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "exr", "bmp", "tif", "tiff"],
+                )
+                .set_title("Import image"),
+            AssetKind::Video => rfd::FileDialog::new()
+                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
+                .set_title("Import video"),
+            AssetKind::Audio => rfd::FileDialog::new()
+                .add_filter(
+                    "Audio",
+                    &["wav", "mp3", "flac", "ogg", "aac", "m4a", "opus"],
+                )
+                .set_title("Import audio"),
+        };
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let asset_id = self.project.add_asset(path.clone(), kind);
+        let Some(comp) = self.project.composition_mut(self.comp_id) else {
+            return;
+        };
+        let dur = comp.duration_frames;
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "imported".into());
+        let layer_kind = match kind {
+            AssetKind::Image => felx_core::model::LayerKind::Image { asset: asset_id },
+            AssetKind::Video => felx_core::model::LayerKind::Video { asset: asset_id },
+            AssetKind::Audio => felx_core::model::LayerKind::Audio { asset: asset_id },
+        };
+        let id = comp.add_layer(label, layer_kind, 0, dur);
+        self.selected_layer = Some(id);
+        self.render_dirty = true;
+        self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+        info!(asset = ?path, kind = ?kind, "imported media");
+    }
+
+    fn open_project_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("felx project", &["felx"])
+            .set_title("Open project")
+            .pick_file()
+        else {
+            return;
+        };
+        match Project::load(&path) {
+            Ok(p) => {
+                let comp_id = p.compositions.first().map(|c| c.id).unwrap_or(self.comp_id);
+                let comp = p.composition(comp_id).expect("comp from loaded project");
+                let playhead =
+                    crate::playback::Playhead::new(comp.framerate.as_fps(), comp.duration_frames);
+                self.project = p;
+                self.comp_id = comp_id;
+                self.playhead = playhead;
+                self.selected_layer = None;
+                self.current_project_path = Some(path);
+                self.render_dirty = true;
+                self.compositor.cache_mut().clear();
+                info!(path = ?self.current_project_path, "project loaded");
+            }
+            Err(e) => {
+                warn!(error = %e, "project load failed");
+            }
+        }
+    }
+
+    fn save_project_dialog(&mut self) {
+        let path = match &self.current_project_path {
+            Some(p) => p.clone(),
+            None => {
+                let Some(picked) = rfd::FileDialog::new()
+                    .add_filter("felx project", &["felx"])
+                    .set_title("Save project")
+                    .save_file()
+                else {
+                    return;
+                };
+                picked
+            }
+        };
+        match self.project.save(&path) {
+            Ok(()) => {
+                self.current_project_path = Some(path.clone());
+                info!(path = ?path, "project saved");
+            }
+            Err(e) => {
+                warn!(error = %e, "project save failed");
+            }
+        }
     }
 
     fn process_hot_reload(&mut self) {
@@ -438,6 +542,9 @@ impl FelxApp {
                         self.selected_layer = Some(id);
                     }
                 }
+                LayerAction::ImportImage => self.import_media(AssetKind::Image),
+                LayerAction::ImportVideo => self.import_media(AssetKind::Video),
+                LayerAction::ImportAudio => self.import_media(AssetKind::Audio),
                 LayerAction::Delete(id) => {
                     if let Some(comp) = self.project.composition_mut(self.comp_id) {
                         comp.remove_layer(id);
@@ -531,11 +638,29 @@ impl App for FelxApp {
             self.render_dirty = true;
         }
 
-        // Top menu strip: preset selector + help.
+        // Top menu strip: file ops, preset selector, help.
         let mut chosen_preset: Option<usize> = None;
         let mut chosen_help: Option<String> = None;
+        let mut do_open = false;
+        let mut do_save = false;
+        let mut do_save_as = false;
         TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open project…").clicked() {
+                        do_open = true;
+                        ui.close();
+                    }
+                    if ui.button("Save project").clicked() {
+                        do_save = true;
+                        ui.close();
+                    }
+                    if ui.button("Save project as…").clicked() {
+                        do_save_as = true;
+                        ui.close();
+                    }
+                });
+                ui.separator();
                 ui.label("Presets:");
                 for (i, p) in self.presets.iter().enumerate() {
                     if ui.button(&p.name).on_hover_text(&p.description).clicked() {
@@ -556,6 +681,16 @@ impl App for FelxApp {
                 });
             });
         });
+        if do_open {
+            self.open_project_dialog();
+        }
+        if do_save {
+            self.save_project_dialog();
+        }
+        if do_save_as {
+            self.current_project_path = None;
+            self.save_project_dialog();
+        }
         if let Some(i) = chosen_preset {
             self.apply_preset(i);
         }

@@ -11,6 +11,15 @@ pub enum LayerAction {
     Select(Option<LayerId>),
     AddSolid,
     AddAdjustment,
+    /// Open a file dialog and import the chosen file as an Image asset +
+    /// Image layer.
+    ImportImage,
+    /// Open a file dialog and import the chosen file as a Video asset +
+    /// Video layer.
+    ImportVideo,
+    /// Open a file dialog and import the chosen file as an Audio asset +
+    /// Audio layer.
+    ImportAudio,
     Delete(LayerId),
     MoveUp(LayerId),
     MoveDown(LayerId),
@@ -35,6 +44,29 @@ pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<L
                 actions.push(LayerAction::AddSolid);
             }
         });
+    });
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("📁 Image")
+            .on_hover_text("Import an image file as a new Image layer")
+            .clicked()
+        {
+            actions.push(LayerAction::ImportImage);
+        }
+        if ui
+            .small_button("📁 Video")
+            .on_hover_text("Import a video file as a new Video layer")
+            .clicked()
+        {
+            actions.push(LayerAction::ImportVideo);
+        }
+        if ui
+            .small_button("📁 Audio")
+            .on_hover_text("Import an audio file as a new Audio layer")
+            .clicked()
+        {
+            actions.push(LayerAction::ImportAudio);
+        }
     });
     ui.separator();
 
