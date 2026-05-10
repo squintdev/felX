@@ -45,6 +45,36 @@ pub struct FelxApp {
     /// Graph editor visibility. Off by default to avoid eating screen real
     /// estate before the user has any animated parameters.
     graph_editor_open: bool,
+    /// Optional region-of-interest for the preview. Normalized comp-space
+    /// (0..1, 0..1, with origin at top-left). When `Some`, the viewer paints
+    /// only this sub-rectangle stretched to fill the viewer area. Per-effect
+    /// region-aware rendering — actually skipping pixels outside the region
+    /// inside the compositor — is a perf follow-up.
+    render_region: Option<RegionRect>,
+    /// Mid-drag state for the shift-drag region selector. Normalized.
+    region_drag_anchor: Option<egui::Vec2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegionRect {
+    pub u_min: f32,
+    pub v_min: f32,
+    pub u_max: f32,
+    pub v_max: f32,
+}
+
+impl RegionRect {
+    pub fn from_corners(a: egui::Vec2, b: egui::Vec2) -> Self {
+        Self {
+            u_min: a.x.min(b.x).clamp(0.0, 1.0),
+            v_min: a.y.min(b.y).clamp(0.0, 1.0),
+            u_max: a.x.max(b.x).clamp(0.0, 1.0),
+            v_max: a.y.max(b.y).clamp(0.0, 1.0),
+        }
+    }
+    pub fn is_degenerate(&self) -> bool {
+        (self.u_max - self.u_min) < 0.01 || (self.v_max - self.v_min) < 0.01
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +139,8 @@ impl FelxApp {
             egui_texture: None,
             render_dirty: true,
             graph_editor_open: false,
+            render_region: None,
+            region_drag_anchor: None,
         })
     }
 
@@ -463,16 +495,73 @@ impl App for FelxApp {
                 let avail = ui.available_size();
                 let aspect = self.comp_aspect();
                 let size = fit_aspect(avail, aspect);
-                let (rect, _resp) = ui.allocate_exact_size(size, Sense::hover());
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+
+                // Region-of-interest (F-048): shift-drag to set, Esc clears.
+                let shift_held = ui.input(|i| i.modifiers.shift);
+                let esc_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if esc_pressed {
+                    self.render_region = None;
+                    self.region_drag_anchor = None;
+                }
+                if response.drag_started() && shift_held {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        self.region_drag_anchor = Some(viewer_to_norm(rect, pos));
+                    }
+                } else if response.dragged() && self.region_drag_anchor.is_some() {
+                    if let (Some(pos), Some(anchor)) =
+                        (response.interact_pointer_pos(), self.region_drag_anchor)
+                    {
+                        let now = viewer_to_norm(rect, pos);
+                        let region = RegionRect::from_corners(anchor, now);
+                        if !region.is_degenerate() {
+                            self.render_region = Some(region);
+                        }
+                    }
+                } else if response.drag_stopped() {
+                    self.region_drag_anchor = None;
+                }
 
                 if let Some(id) = self.egui_texture {
                     let painter = ui.painter_at(rect);
-                    painter.image(
-                        id,
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    let uv = match self.render_region {
+                        Some(r) => egui::Rect::from_min_max(
+                            egui::pos2(r.u_min, r.v_min),
+                            egui::pos2(r.u_max, r.v_max),
+                        ),
+                        None => {
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                        }
+                    };
+                    painter.image(id, rect, uv, Color32::WHITE);
+
+                    // Region overlay: subtle dimming outside the region and a
+                    // bright outline around it. Only meaningful when set.
+                    if let Some(r) = self.render_region {
+                        let stroke = egui::Stroke::new(1.5, Color32::from_rgb(255, 220, 80));
+                        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+                        let label = format!(
+                            "ROI {:.0}×{:.0}% · Esc to clear",
+                            (r.u_max - r.u_min) * 100.0,
+                            (r.v_max - r.v_min) * 100.0
+                        );
+                        painter.text(
+                            rect.left_top() + egui::vec2(8.0, 8.0),
+                            egui::Align2::LEFT_TOP,
+                            label,
+                            egui::FontId::monospace(11.0),
+                            Color32::from_rgb(255, 220, 80),
+                        );
+                    } else if shift_held {
+                        // Subtle hint: shift-drag draws a region.
+                        painter.text(
+                            rect.right_top() + egui::vec2(-8.0, 8.0),
+                            egui::Align2::RIGHT_TOP,
+                            "shift-drag to set ROI",
+                            egui::FontId::monospace(11.0),
+                            Color32::from_gray(200),
+                        );
+                    }
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label(
@@ -536,6 +625,15 @@ fn default_project(manifests: &ManifestRegistry) -> (Project, CompId) {
         .unwrap_or_else(|| Effect::new("gain"));
     comp.push_effect(layer, gain_effect);
     (project, comp_id)
+}
+
+/// Convert a screen position inside the viewer rect to normalized comp UV
+/// (0..1 origin top-left).
+fn viewer_to_norm(rect: egui::Rect, pos: egui::Pos2) -> egui::Vec2 {
+    egui::vec2(
+        ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+        ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+    )
 }
 
 /// Largest box fitting `avail` while preserving `aspect` (= w/h).
