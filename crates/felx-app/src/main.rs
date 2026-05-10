@@ -12,6 +12,7 @@ mod hot_reload;
 mod manifests;
 mod panels;
 mod playback;
+mod presets;
 
 use app::FelxApp;
 use eframe::NativeOptions;

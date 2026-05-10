@@ -1,0 +1,23 @@
+// 1990s consumer Trinitron-style CRT. Aperture grille, soft scanlines,
+// gentle bloom-vignette feel.
+(
+    name: "CRT — Consumer Trinitron",
+    description: "1990s consumer Trinitron with aperture grille and soft scanlines.",
+    effects: [
+        (
+            id: "crt",
+            values: {
+                "curvature_x": Float(0.06),
+                "curvature_y": Float(0.08),
+                "scanline_intensity": Float(0.35),
+                "scanline_thickness": Float(0.6),
+                "mask_intensity": Float(0.45),
+                "mask_size": Float(3.0),
+                "mask_type": Enum("aperture_grille"),
+                "convergence_radial": Float(1.5),
+                "vignette_intensity": Float(0.4),
+                "vignette_softness": Float(0.4),
+            },
+        ),
+    ],
+)

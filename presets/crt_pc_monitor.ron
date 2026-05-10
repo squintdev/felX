@@ -1,0 +1,22 @@
+// 1990s PC monitor: dot trio, sharper scanlines, less curvature, less bloom.
+(
+    name: "CRT — PC Monitor",
+    description: "1990s desktop PC CRT: dot-trio shadow mask, sharp scanlines, mild curvature.",
+    effects: [
+        (
+            id: "crt",
+            values: {
+                "curvature_x": Float(0.03),
+                "curvature_y": Float(0.04),
+                "scanline_intensity": Float(0.25),
+                "scanline_thickness": Float(0.8),
+                "mask_intensity": Float(0.3),
+                "mask_size": Float(2.0),
+                "mask_type": Enum("dot_trio"),
+                "convergence_radial": Float(0.8),
+                "vignette_intensity": Float(0.2),
+                "vignette_softness": Float(0.5),
+            },
+        ),
+    ],
+)

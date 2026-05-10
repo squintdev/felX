@@ -7,6 +7,7 @@ use crate::panels::effects::{self, EffectsAction};
 use crate::panels::layers::{self, LayerAction};
 use crate::panels::transport::{self, TransportAction};
 use crate::playback::Playhead;
+use crate::presets::PresetRegistry;
 use eframe::egui_wgpu::RenderState;
 use eframe::{App, CreationContext, Frame};
 use egui::{CentralPanel, Color32, Context, Sense, SidePanel, TextureId, TopBottomPanel, Vec2};
@@ -26,6 +27,7 @@ pub struct FelxApp {
     preview_scale: PreviewScale,
     selected_layer: Option<LayerId>,
     manifests: ManifestRegistry,
+    presets: PresetRegistry,
     /// Filesystem watcher for `effects/<id>/effect.wgsl`. None if the
     /// effects dir couldn't be located (running from a non-source layout).
     hot_reload: Option<HotReloadWatcher>,
@@ -69,6 +71,7 @@ impl FelxApp {
         let renderer = build_renderer(render_state);
         let compositor = Compositor::new(renderer);
         let manifests = ManifestRegistry::load_builtins();
+        let presets = PresetRegistry::load_builtins();
         let (project, comp_id) = default_project(&manifests);
         let comp = project.composition(comp_id).expect("comp exists");
         let playhead = Playhead::new(comp.framerate.as_fps(), comp.duration_frames);
@@ -96,6 +99,7 @@ impl FelxApp {
             preview_scale: PreviewScale::default(),
             selected_layer: None,
             manifests,
+            presets,
             hot_reload,
             shader_error: None,
             egui_texture: None,
@@ -182,6 +186,35 @@ impl FelxApp {
         if moved {
             self.render_dirty = true;
         }
+    }
+
+    fn apply_preset(&mut self, preset_index: usize) {
+        let Some(preset) = self.presets.iter().nth(preset_index).cloned() else {
+            return;
+        };
+        let Some(layer_id) = self.selected_layer else {
+            warn!("apply_preset: no layer selected");
+            return;
+        };
+        let Some(comp) = self.project.composition_mut(self.comp_id) else {
+            return;
+        };
+        let Some(layer) = comp.layer_mut(layer_id) else {
+            return;
+        };
+        for pe in &preset.effects {
+            let mut effect = match self.manifests.get(&pe.id) {
+                Some(m) => felx_core::model::Effect::from_manifest(m),
+                None => felx_core::model::Effect::new(pe.id.clone()),
+            };
+            for (id, value) in pe.values.iter() {
+                effect.values.set(id.to_string(), value.clone());
+            }
+            layer.effects.push(effect);
+        }
+        info!(preset = %preset.name, "preset applied");
+        self.render_dirty = true;
+        self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
     }
 
     fn apply_effects_actions(&mut self, actions: Vec<EffectsAction>) {
@@ -313,6 +346,22 @@ impl App for FelxApp {
         // so the transport bar shows the new frame.
         if self.playhead.tick() {
             self.render_dirty = true;
+        }
+
+        // Top menu strip: preset selector.
+        let mut chosen_preset: Option<usize> = None;
+        TopBottomPanel::top("menu").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Presets:");
+                for (i, p) in self.presets.iter().enumerate() {
+                    if ui.button(&p.name).on_hover_text(&p.description).clicked() {
+                        chosen_preset = Some(i);
+                    }
+                }
+            });
+        });
+        if let Some(i) = chosen_preset {
+            self.apply_preset(i);
         }
 
         let transport_actions = TopBottomPanel::bottom("transport")
