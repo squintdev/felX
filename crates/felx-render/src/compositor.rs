@@ -112,12 +112,30 @@ impl std::fmt::Display for CompositorError {
     }
 }
 
-fn maybe_resize(img: RgbaImage, w: u32, h: u32) -> RgbaImage {
-    if img.width() == w && img.height() == h {
+/// Fit `img` into an `out_w` × `out_h` canvas preserving the source's
+/// aspect ratio. Letterboxes / pillarboxes with transparent borders so
+/// imported images and video frames don't get stretched.
+fn fit_into_canvas(img: RgbaImage, out_w: u32, out_h: u32) -> RgbaImage {
+    if img.width() == out_w && img.height() == out_h {
+        return img;
+    }
+    let (src_w, src_h) = img.dimensions();
+    if src_w == 0 || src_h == 0 || out_w == 0 || out_h == 0 {
+        return ImageBuffer::from_pixel(out_w.max(1), out_h.max(1), Rgba([0, 0, 0, 0]));
+    }
+    let scale = (out_w as f32 / src_w as f32).min(out_h as f32 / src_h as f32);
+    let new_w = ((src_w as f32 * scale).round() as u32).clamp(1, out_w);
+    let new_h = ((src_h as f32 * scale).round() as u32).clamp(1, out_h);
+    let resized = if new_w == src_w && new_h == src_h {
         img
     } else {
-        imageops::resize(&img, w, h, imageops::FilterType::Triangle)
-    }
+        imageops::resize(&img, new_w, new_h, imageops::FilterType::Triangle)
+    };
+    let mut canvas: RgbaImage = ImageBuffer::from_pixel(out_w, out_h, Rgba([0, 0, 0, 0]));
+    let off_x = (out_w.saturating_sub(new_w)) / 2;
+    let off_y = (out_h.saturating_sub(new_h)) / 2;
+    imageops::overlay(&mut canvas, &resized, off_x as i64, off_y as i64);
+    canvas
 }
 
 fn ffmpeg_error_invalid_data() -> ffmpeg_next::Error {
@@ -1242,7 +1260,7 @@ impl Compositor {
         if entry.last_frame == Some(source_frame)
             && let Some(img) = &entry.last_image
         {
-            return Ok(maybe_resize(img.clone(), comp_w, comp_h));
+            return Ok(fit_into_canvas(img.clone(), comp_w, comp_h));
         }
 
         // Decide whether to seek. Seek if there is no last frame, the
@@ -1275,7 +1293,7 @@ impl Compositor {
                 let img = latest
                     .unwrap_or_else(|| ImageBuffer::from_pixel(comp_w, comp_h, Rgba([0, 0, 0, 0])));
                 entry.last_image = Some(img.clone());
-                return Ok(maybe_resize(img, comp_w, comp_h));
+                return Ok(fit_into_canvas(img, comp_w, comp_h));
             };
             let frame_idx = (frame.pts.as_secs_f64() * entry.fps).round().max(0.0) as u32;
             let img = ImageBuffer::from_raw(frame.width, frame.height, frame.rgba).ok_or(
@@ -1288,7 +1306,7 @@ impl Compositor {
                 let img = latest.expect("just assigned");
                 entry.last_frame = Some(frame_idx);
                 entry.last_image = Some(img.clone());
-                return Ok(maybe_resize(img, comp_w, comp_h));
+                return Ok(fit_into_canvas(img, comp_w, comp_h));
             }
         }
     }
@@ -1316,11 +1334,8 @@ impl Compositor {
             LayerKind::Image { asset } => {
                 let a = project.asset(*asset).ok_or(CompositorError::UnknownAsset)?;
                 let img = image::open(&a.path).map_err(CompositorError::AssetDecode)?;
-                let mut rgba = img.to_rgba8();
-                if rgba.width() != comp_w || rgba.height() != comp_h {
-                    rgba = imageops::resize(&rgba, comp_w, comp_h, imageops::FilterType::Triangle);
-                }
-                Ok(rgba)
+                let rgba = img.to_rgba8();
+                Ok(fit_into_canvas(rgba, comp_w, comp_h))
             }
             LayerKind::Solid { color } => {
                 let r = (color[0].clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -1359,4 +1374,55 @@ fn build_diffusion_params(eff: &Effect) -> DiffusionParams {
         palette = vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
     }
     DiffusionParams::new(error_weight, alpha, palette)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_into_canvas;
+    use image::{ImageBuffer, Rgba};
+
+    fn solid(w: u32, h: u32, rgba: [u8; 4]) -> image::RgbaImage {
+        ImageBuffer::from_pixel(w, h, Rgba(rgba))
+    }
+
+    #[test]
+    fn fit_preserves_landscape_aspect_with_pillarbox() {
+        // 16:9 source into 16:9 comp — no borders.
+        let out = fit_into_canvas(solid(160, 90, [255, 0, 0, 255]), 320, 180);
+        assert_eq!(out.dimensions(), (320, 180));
+        // Center should be source color.
+        assert_eq!(out.get_pixel(160, 90)[0], 255);
+        // Corners should be source color too (full coverage at matching aspect).
+        assert_eq!(out.get_pixel(1, 1)[0], 255);
+    }
+
+    #[test]
+    fn fit_landscape_source_in_square_comp_pillarboxes_top_bottom() {
+        // 16:9 source into 1:1 comp — should letterbox top + bottom transparent.
+        let out = fit_into_canvas(solid(160, 90, [0, 255, 0, 255]), 200, 200);
+        assert_eq!(out.dimensions(), (200, 200));
+        // Top edge should be transparent (above the fitted image).
+        assert_eq!(out.get_pixel(100, 0)[3], 0);
+        // Vertical center should be the fitted source.
+        assert_eq!(out.get_pixel(100, 100)[1], 255);
+        assert_eq!(out.get_pixel(100, 100)[3], 255);
+    }
+
+    #[test]
+    fn fit_portrait_source_in_landscape_comp_pillarboxes_sides() {
+        // 9:16 source into 16:9 comp — sides transparent.
+        let out = fit_into_canvas(solid(90, 160, [0, 0, 255, 255]), 320, 180);
+        assert_eq!(out.dimensions(), (320, 180));
+        // Left edge should be transparent.
+        assert_eq!(out.get_pixel(0, 90)[3], 0);
+        // Center should be source.
+        assert_eq!(out.get_pixel(160, 90)[2], 255);
+    }
+
+    #[test]
+    fn fit_matching_dims_returns_unchanged() {
+        let src = solid(64, 48, [10, 20, 30, 255]);
+        let out = fit_into_canvas(src.clone(), 64, 48);
+        assert_eq!(out.as_raw(), src.as_raw());
+    }
 }

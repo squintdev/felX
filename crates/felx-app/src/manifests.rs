@@ -55,6 +55,13 @@ impl ManifestRegistry {
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
+
+    /// Iterate manifests in the order declared by `BUILTIN_EFFECTS`. The
+    /// stable ordering is what the "Add effect" picker uses so the list
+    /// reads predictably (`gain` first, exotic stuff last).
+    pub fn iter_ordered(&self) -> impl Iterator<Item = &EffectManifest> {
+        BUILTIN_EFFECTS.iter().filter_map(|id| self.by_id.get(*id))
+    }
 }
 
 fn effects_root() -> PathBuf {

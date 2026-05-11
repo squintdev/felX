@@ -19,6 +19,14 @@ pub enum EffectsAction {
     },
     /// Toggle `effect_index`'s enabled flag.
     ToggleEnabled { effect_index: usize, enabled: bool },
+    /// Append a new effect (built from its manifest defaults) to the layer.
+    AddEffect { effect_id: String },
+    /// Remove the effect at `effect_index`.
+    RemoveEffect { effect_index: usize },
+    /// Reorder: move `effect_index` up (earlier in the chain).
+    MoveUp { effect_index: usize },
+    /// Reorder: move `effect_index` down (later in the chain).
+    MoveDown { effect_index: usize },
 }
 
 pub fn show(
@@ -29,7 +37,14 @@ pub fn show(
 ) -> Vec<EffectsAction> {
     let mut actions = Vec::new();
 
-    ui.heading("Effects");
+    ui.horizontal(|ui| {
+        ui.heading("Effects");
+        if layer.is_some() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                render_add_effect_menu(ui, registry, &mut actions);
+            });
+        }
+    });
     ui.separator();
 
     let Some(layer) = layer else {
@@ -43,53 +58,107 @@ pub fn show(
 
     if layer.effects.is_empty() {
         ui.label(
-            RichText::new("(no effects on this layer)")
+            RichText::new("(no effects on this layer — use \"+ Effect\" above to add one)")
                 .color(Color32::from_gray(120))
                 .italics(),
         );
         return actions;
     }
 
+    let n = layer.effects.len();
     for (idx, eff) in layer.effects.iter().enumerate() {
         let header_label = registry
             .get(&eff.id)
             .map(|m| m.display_name.as_str())
             .unwrap_or(eff.id.as_str());
 
-        CollapsingHeader::new(header_label)
-            .id_salt(("effect-header", idx))
-            .default_open(true)
-            .show(ui, |ui| {
-                let mut enabled = eff.enabled;
-                if ui.checkbox(&mut enabled, "enabled").changed() {
-                    actions.push(EffectsAction::ToggleEnabled {
-                        effect_index: idx,
-                        enabled,
-                    });
-                }
+        ui.horizontal(|ui| {
+            CollapsingHeader::new(header_label)
+                .id_salt(("effect-header", idx))
+                .default_open(true)
+                .show(ui, |ui| {
+                    let mut enabled = eff.enabled;
+                    if ui.checkbox(&mut enabled, "enabled").changed() {
+                        actions.push(EffectsAction::ToggleEnabled {
+                            effect_index: idx,
+                            enabled,
+                        });
+                    }
 
-                let Some(manifest) = registry.get(&eff.id) else {
-                    ui.label(
-                        RichText::new(format!("(no manifest registered for '{}')", eff.id))
-                            .color(Color32::from_gray(120))
-                            .italics(),
+                    let Some(manifest) = registry.get(&eff.id) else {
+                        ui.label(
+                            RichText::new(format!("(no manifest registered for '{}')", eff.id))
+                                .color(Color32::from_gray(120))
+                                .italics(),
+                        );
+                        return;
+                    };
+
+                    render_param_list(
+                        ui,
+                        idx,
+                        &manifest.parameters,
+                        "",
+                        &eff.values,
+                        time,
+                        &mut actions,
                     );
-                    return;
-                };
-
-                render_param_list(
-                    ui,
-                    idx,
-                    &manifest.parameters,
-                    "",
-                    &eff.values,
-                    time,
-                    &mut actions,
-                );
+                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Remove this effect")
+                    .clicked()
+                {
+                    actions.push(EffectsAction::RemoveEffect { effect_index: idx });
+                }
+                if idx + 1 < n
+                    && ui
+                        .small_button("▼")
+                        .on_hover_text("Move later in chain")
+                        .clicked()
+                {
+                    actions.push(EffectsAction::MoveDown { effect_index: idx });
+                }
+                if idx > 0
+                    && ui
+                        .small_button("▲")
+                        .on_hover_text("Move earlier in chain")
+                        .clicked()
+                {
+                    actions.push(EffectsAction::MoveUp { effect_index: idx });
+                }
             });
+        });
     }
 
     actions
+}
+
+fn render_add_effect_menu(
+    ui: &mut Ui,
+    registry: &ManifestRegistry,
+    actions: &mut Vec<EffectsAction>,
+) {
+    ui.menu_button("+ Effect", |ui| {
+        if registry.len() == 0 {
+            ui.label(
+                RichText::new("(no manifests loaded)")
+                    .color(Color32::from_gray(120))
+                    .italics(),
+            );
+            return;
+        }
+        for manifest in registry.iter_ordered() {
+            let label = format!("{}  —  {}", manifest.display_name, manifest.category);
+            if ui.button(label).clicked() {
+                actions.push(EffectsAction::AddEffect {
+                    effect_id: manifest.id.clone(),
+                });
+                ui.close();
+            }
+        }
+    });
 }
 
 fn render_param_list(

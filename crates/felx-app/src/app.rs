@@ -378,13 +378,31 @@ impl FelxApp {
         let Some(layer_id) = self.selected_layer else {
             return;
         };
+        // Resolve any AddEffect actions first by looking up manifests on
+        // the *immutable* registry, then enter the mutable comp scope.
+        let mut new_effects: Vec<felx_core::model::Effect> = Vec::new();
+        let mut remaining: Vec<EffectsAction> = Vec::new();
+        for action in actions {
+            if let EffectsAction::AddEffect { effect_id } = &action {
+                let effect = match self.manifests.get(effect_id) {
+                    Some(m) => felx_core::model::Effect::from_manifest(m),
+                    None => felx_core::model::Effect::new(effect_id.clone()),
+                };
+                new_effects.push(effect);
+            } else {
+                remaining.push(action);
+            }
+        }
         let Some(comp) = self.project.composition_mut(self.comp_id) else {
             return;
         };
         let Some(layer) = comp.layer_mut(layer_id) else {
             return;
         };
-        for action in actions {
+        for eff in new_effects {
+            layer.effects.push(eff);
+        }
+        for action in remaining {
             match action {
                 EffectsAction::SetValue {
                     effect_index,
@@ -402,6 +420,24 @@ impl FelxApp {
                     if let Some(eff) = layer.effects.get_mut(effect_index) {
                         eff.enabled = enabled;
                     }
+                }
+                EffectsAction::RemoveEffect { effect_index } => {
+                    if effect_index < layer.effects.len() {
+                        layer.effects.remove(effect_index);
+                    }
+                }
+                EffectsAction::MoveUp { effect_index } => {
+                    if effect_index > 0 && effect_index < layer.effects.len() {
+                        layer.effects.swap(effect_index - 1, effect_index);
+                    }
+                }
+                EffectsAction::MoveDown { effect_index } => {
+                    if effect_index + 1 < layer.effects.len() {
+                        layer.effects.swap(effect_index, effect_index + 1);
+                    }
+                }
+                EffectsAction::AddEffect { .. } => {
+                    // Already handled in the first pass above.
                 }
             }
         }
