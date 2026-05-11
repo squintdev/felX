@@ -442,6 +442,15 @@ impl FelxApp {
                         pick_path = true;
                     }
                 });
+                if let Some(ext) = self.export_options.format.required_extension() {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Filename should end in .{ext} (auto-appended if missing)"
+                        ))
+                        .small()
+                        .color(Color32::from_gray(140)),
+                    );
+                }
 
                 ui.separator();
                 let ready = self.export_options.out_path.is_some();

@@ -4,7 +4,7 @@
 //! so we hold them by value here; cloning is cheap and avoids a redundant
 //! `Arc<Arc<...>>` layer when interoperating with eframe.
 
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct AdapterInfo {
@@ -157,11 +157,89 @@ impl Renderer {
     }
 }
 
+/// Pick the most-capable wgpu adapter we can find, with overrides:
+///
+/// 1. `FELX_GPU=<substring>` — case-insensitive substring match on the
+///    adapter name. `FELX_GPU=nvidia` selects the NVIDIA card, `intel`
+///    forces the iGPU, etc.
+/// 2. `FELX_BACKEND=<vulkan|metal|dx12|gl>` — force a specific backend.
+/// 3. Else: prefer a discrete GPU on a non-GL backend (Vulkan / Metal /
+///    DX12). Falls back to whatever `HighPerformance` returns.
+///
+/// Without these overrides, `wgpu::Instance::request_adapter` on Linux
+/// PRIME setups (Intel iGPU + NVIDIA dGPU) often returns the Intel
+/// adapter via Mesa's GL backend because GL adapters enumerate first.
+/// Enumerating ourselves fixes that.
 async fn request_adapter(
     instance: &wgpu::Instance,
     power: wgpu::PowerPreference,
     allow_software_fallback: bool,
 ) -> Result<wgpu::Adapter, RendererError> {
+    // Log every adapter so users can see what's available and what we
+    // picked from. Cheap and high-signal for "why is it using my iGPU?"
+    // diagnoses.
+    let all: Vec<wgpu::Adapter> = instance.enumerate_adapters(wgpu::Backends::all());
+    for a in &all {
+        let info = a.get_info();
+        info!(
+            name = %info.name,
+            backend = ?info.backend,
+            device_type = ?info.device_type,
+            "wgpu adapter available"
+        );
+    }
+
+    // 1) Explicit override by name substring.
+    if let Ok(want) = std::env::var("FELX_GPU")
+        && !want.is_empty()
+    {
+        let want_lower = want.to_lowercase();
+        if let Some(a) = all
+            .iter()
+            .find(|a| a.get_info().name.to_lowercase().contains(&want_lower))
+        {
+            info!(want, "FELX_GPU matched");
+            return Ok(clone_via_re_enumerate(instance, a.get_info()));
+        }
+        warn!(want, "FELX_GPU set but no adapter matched; falling back");
+    }
+
+    // 2) Explicit backend override.
+    let backend_override =
+        std::env::var("FELX_BACKEND")
+            .ok()
+            .and_then(|s| match s.to_lowercase().as_str() {
+                "vulkan" => Some(wgpu::Backend::Vulkan),
+                "metal" => Some(wgpu::Backend::Metal),
+                "dx12" | "d3d12" => Some(wgpu::Backend::Dx12),
+                "gl" | "opengl" => Some(wgpu::Backend::Gl),
+                _ => None,
+            });
+    if let Some(want_backend) = backend_override
+        && let Some(a) = all.iter().find(|a| a.get_info().backend == want_backend)
+    {
+        return Ok(clone_via_re_enumerate(instance, a.get_info()));
+    }
+
+    // 3) Prefer DiscreteGpu on a non-GL backend.
+    let preferred = all.iter().find(|a| {
+        let info = a.get_info();
+        matches!(info.device_type, wgpu::DeviceType::DiscreteGpu)
+            && !matches!(info.backend, wgpu::Backend::Gl)
+    });
+    if let Some(a) = preferred {
+        return Ok(clone_via_re_enumerate(instance, a.get_info()));
+    }
+
+    // 4) Any non-GL adapter (avoid Mesa's GL when Vulkan is available).
+    let any_non_gl = all
+        .iter()
+        .find(|a| !matches!(a.get_info().backend, wgpu::Backend::Gl));
+    if let Some(a) = any_non_gl {
+        return Ok(clone_via_re_enumerate(instance, a.get_info()));
+    }
+
+    // 5) Fall back to wgpu's built-in HighPerformance selection.
     match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: power,
@@ -181,6 +259,28 @@ async fn request_adapter(
             .map_err(|_| RendererError::NoCompatibleAdapter),
         Err(_) => Err(RendererError::NoCompatibleAdapter),
     }
+}
+
+/// `wgpu::Adapter` doesn't impl `Clone`. Once we've identified the
+/// adapter we want by inspecting the enumerated set, re-enumerate and
+/// take the matching one by ownership. Slightly wasteful but the cost
+/// is one Vulkan / DX12 instance scan, which is microseconds.
+fn clone_via_re_enumerate(instance: &wgpu::Instance, target: wgpu::AdapterInfo) -> wgpu::Adapter {
+    let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
+    if let Some(idx) = adapters.iter().position(|a| {
+        let i = a.get_info();
+        i.name == target.name
+            && i.vendor == target.vendor
+            && i.device == target.device
+            && i.backend == target.backend
+    }) {
+        return adapters.swap_remove(idx);
+    }
+    // Should not happen — we just enumerated the same backends.
+    adapters
+        .into_iter()
+        .next()
+        .expect("at least one adapter must exist")
 }
 
 #[cfg(test)]

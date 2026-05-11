@@ -56,6 +56,58 @@ impl ExportFormat {
         ExportFormat::ExrSequence,
         ExportFormat::Wav,
     ];
+
+    /// File extension the format needs on its output path. ffmpeg picks
+    /// the muxer (mp4 vs mov vs etc.) from the extension, so getting this
+    /// right is the difference between a clean export and an EINVAL.
+    /// Sequence formats return None — the output is a directory.
+    pub fn required_extension(self) -> Option<&'static str> {
+        match self {
+            ExportFormat::H264 | ExportFormat::H265 => Some("mp4"),
+            ExportFormat::Prores422 | ExportFormat::Prores4444 => Some("mov"),
+            ExportFormat::Gif => Some("gif"),
+            ExportFormat::Wav => Some("wav"),
+            ExportFormat::PngSequence | ExportFormat::ExrSequence => None,
+        }
+    }
+}
+
+/// Append the format's expected extension if `path` doesn't already
+/// carry it (case-insensitive). Returns `(normalized_path, was_changed)`.
+/// For video formats we accept either `mp4` / `mov` / `m4v` / `mkv` as
+/// valid containers; for everything else we require the exact extension.
+pub fn ensure_extension(format: ExportFormat, path: PathBuf) -> (PathBuf, bool) {
+    let Some(want) = format.required_extension() else {
+        return (path, false);
+    };
+    let have = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if matches!(have.as_deref(), Some(e) if e == want) {
+        return (path, false);
+    }
+    // Accept other video containers if the user explicitly typed one.
+    let video_compat = matches!(
+        format,
+        ExportFormat::H264
+            | ExportFormat::H265
+            | ExportFormat::Prores422
+            | ExportFormat::Prores4444
+    ) && matches!(
+        have.as_deref(),
+        Some("mp4") | Some("mov") | Some("m4v") | Some("mkv")
+    );
+    if video_compat {
+        return (path, false);
+    }
+    let new_name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(name) => format!("{name}.{want}"),
+        None => format!("export.{want}"),
+    };
+    let mut new_path = path.clone();
+    new_path.set_file_name(new_name);
+    (new_path, true)
 }
 
 /// User-tunable parameters per export. Live in the dialog and get cloned
@@ -129,11 +181,20 @@ impl ExportStatus {
 pub fn spawn_export(
     project: Project,
     comp_id: CompId,
-    opts: ExportOptions,
+    mut opts: ExportOptions,
 ) -> Result<ExportJob, String> {
-    let Some(out_path) = opts.out_path.clone() else {
+    let Some(raw_path) = opts.out_path.clone() else {
         return Err("no output path".into());
     };
+    // ffmpeg picks the muxer from the file extension. Auto-append the
+    // expected one so a user-typed path like "recursiva-felx" with no
+    // extension becomes "recursiva-felx.mp4" instead of failing the
+    // encoder open with EINVAL.
+    let (out_path, changed) = ensure_extension(opts.format, raw_path);
+    if changed {
+        tracing::info!(path = ?out_path, "appended extension to output path");
+    }
+    opts.out_path = Some(out_path.clone());
     let format = opts.format;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
