@@ -856,14 +856,20 @@ impl FelxApp {
                         self.audio_playback = None;
                     }
                 }
+                // The layers panel renders `comp.layers.iter().rev()` so the
+                // top panel row = last Vec entry = the layer rendered last
+                // = visually on top. "▲ Move up" means the user wants the
+                // layer higher in the panel (= visually on top), which is
+                // toward the *end* of the Vec — i.e. Composition::
+                // move_layer_down. Flipped likewise for ▼.
                 LayerAction::MoveUp(id) => {
                     if let Some(comp) = self.project.composition_mut(self.comp_id) {
-                        comp.move_layer_up(id);
+                        comp.move_layer_down(id);
                     }
                 }
                 LayerAction::MoveDown(id) => {
                     if let Some(comp) = self.project.composition_mut(self.comp_id) {
-                        comp.move_layer_down(id);
+                        comp.move_layer_up(id);
                     }
                 }
                 LayerAction::SetTimeOffset(id, offset) => {

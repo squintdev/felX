@@ -332,9 +332,14 @@ impl Compositor {
         let comp = project
             .composition(comp_id)
             .ok_or(CompositorError::UnknownComposition)?;
+        // Audio layers are not visual contributors — they're picked up by
+        // the host's audio mixer (felx_app::drive_audio). Skip them in
+        // the visible-layer list so they don't trip resolve_layer_source's
+        // "unsupported Audio" branch and abort the comp render.
         let visible: Vec<&Layer> = comp
             .layers
             .iter()
+            .filter(|l| !matches!(l.kind, LayerKind::Audio { .. }))
             .filter(|l| frame >= l.in_frame && frame < l.out_frame)
             .collect();
         if visible.is_empty() {
@@ -407,9 +412,14 @@ impl Compositor {
             .composition(comp_id)
             .ok_or(CompositorError::UnknownComposition)?;
 
+        // Audio layers are not visual contributors — they're picked up by
+        // the host's audio mixer (felx_app::drive_audio). Skip them in
+        // the visible-layer list so they don't trip resolve_layer_source's
+        // "unsupported Audio" branch and abort the comp render.
         let visible: Vec<&Layer> = comp
             .layers
             .iter()
+            .filter(|l| !matches!(l.kind, LayerKind::Audio { .. }))
             .filter(|l| frame >= l.in_frame && frame < l.out_frame)
             .collect();
         if visible.is_empty() {

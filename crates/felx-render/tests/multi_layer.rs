@@ -127,3 +127,40 @@ fn comp_background_shows_when_no_layers_cover() {
     assert!(pixel[1] >= 120 && pixel[1] <= 140);
     assert!(pixel[0] <= 8);
 }
+
+#[test]
+fn audio_layer_does_not_break_visual_render() {
+    // Regression: a Video import auto-adds an Audio layer that points at
+    // the same file. The Audio layer must not contribute to the visual
+    // stack (it's the host audio mixer's job) or trip the compositor's
+    // "unsupported Audio" branch and abort the render.
+    use felx_core::model::{AssetId, AssetKind};
+    let Some(renderer) = try_renderer() else {
+        return;
+    };
+    let mut p = Project::new();
+    let asset = p.add_asset("/nonexistent/clip.mp4", AssetKind::Audio);
+    assert_eq!(asset, AssetId(1));
+    let comp_id = p.add_composition("main", 8, 8);
+    let comp = p.composition_mut(comp_id).unwrap();
+    comp.duration_frames = 30;
+    comp.background = [0.0, 0.0, 0.0, 1.0];
+    // Visual layer first, audio layer on top.
+    comp.add_layer(
+        "red",
+        LayerKind::Solid {
+            color: [1.0, 0.0, 0.0, 1.0],
+        },
+        0,
+        30,
+    );
+    comp.add_layer("audio_only", LayerKind::Audio { asset }, 0, 30);
+
+    let mut runtime = Compositor::new(renderer);
+    let tex = runtime
+        .render(&p, comp_id, 0)
+        .expect("audio layer must not break the render");
+    let img = download_image(runtime.renderer(), &tex);
+    let pixel = *img.pixels().next().unwrap();
+    assert!(pixel[0] >= 250, "red should still show: {pixel:?}");
+}
