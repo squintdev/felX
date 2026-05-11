@@ -25,6 +25,13 @@ pub enum LayerAction {
     MoveDown(LayerId),
     SetTimeOffset(LayerId, i32),
     SetTimeScale(LayerId, f32),
+    /// Edit the active composition's settings.
+    SetCompWidth(u32),
+    SetCompHeight(u32),
+    /// Framerate as (numerator, denominator). 30/1 = 30fps, 24000/1001 = 23.976.
+    SetCompFramerate(u32, u32),
+    SetCompDurationFrames(u32),
+    SetCompBackground([f32; 4]),
 }
 
 pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<LayerAction> {
@@ -55,7 +62,7 @@ pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<L
         }
         if ui
             .small_button("📁 Video")
-            .on_hover_text("Import a video file as a new Video layer")
+            .on_hover_text("Import a video file (Audio layer is added too if it has sound)")
             .clicked()
         {
             actions.push(LayerAction::ImportVideo);
@@ -67,6 +74,84 @@ pub fn show(ui: &mut Ui, comp: &Composition, selected: Option<LayerId>) -> Vec<L
         {
             actions.push(LayerAction::ImportAudio);
         }
+    });
+    ui.separator();
+
+    // Composition properties. Lets the user change the canvas / framerate /
+    // duration without having to hand-edit the .felx.
+    ui.collapsing("Composition", |ui| {
+        let mut w = comp.width;
+        let mut h = comp.height;
+        let mut dur = comp.duration_frames;
+        let mut fps_num = comp.framerate.0.num;
+        let mut fps_den = comp.framerate.0.den;
+        let mut bg = comp.background;
+
+        ui.horizontal(|ui| {
+            ui.label("width");
+            if ui
+                .add(egui::DragValue::new(&mut w).speed(2.0).range(1..=8192))
+                .changed()
+            {
+                actions.push(LayerAction::SetCompWidth(w));
+            }
+            ui.label("height");
+            if ui
+                .add(egui::DragValue::new(&mut h).speed(2.0).range(1..=8192))
+                .changed()
+            {
+                actions.push(LayerAction::SetCompHeight(h));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("fps");
+            let mut changed = false;
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut fps_num)
+                        .speed(0.1)
+                        .range(1..=240000),
+                )
+                .on_hover_text("numerator")
+                .changed();
+            ui.label("/");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut fps_den)
+                        .speed(0.1)
+                        .range(1..=1001),
+                )
+                .on_hover_text("denominator (1 for whole-number fps, 1001 for NTSC fractional)")
+                .changed();
+            if changed {
+                actions.push(LayerAction::SetCompFramerate(fps_num, fps_den));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("duration (frames)");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut dur)
+                        .speed(1.0)
+                        .range(1..=u32::MAX),
+                )
+                .changed()
+            {
+                actions.push(LayerAction::SetCompDurationFrames(dur));
+            }
+            let secs = dur as f64 / (fps_num as f64 / fps_den as f64);
+            ui.label(
+                RichText::new(format!("≈ {:.2}s", secs))
+                    .color(Color32::from_gray(160))
+                    .small(),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("background");
+            if ui.color_edit_button_rgba_premultiplied(&mut bg).changed() {
+                actions.push(LayerAction::SetCompBackground(bg));
+            }
+        });
     });
     ui.separator();
 

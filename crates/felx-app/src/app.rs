@@ -64,6 +64,21 @@ pub struct FelxApp {
     /// Path of the .felx file the project came from, if any. `None` means
     /// the in-memory default project — Save behaves like Save As.
     current_project_path: Option<PathBuf>,
+    /// cpal output stream + ring buffer (F-052). Lazily constructed on
+    /// the first play to avoid grabbing an audio device on launch.
+    audio_playback: Option<crate::audio_playback::AudioPlayback>,
+    /// Pre-decoded audio sources, one per LayerKind::Audio in the comp.
+    /// Built when [`audio_bus_dirty`] is true and the user starts playing.
+    audio_sources: Vec<felx_core::media::AudioSource>,
+    /// Set when the layer list / asset list changes — the next play tick
+    /// rebuilds [`audio_sources`] from the current project state.
+    audio_bus_dirty: bool,
+    /// Where in the comp timeline the audio playhead is, in master-rate
+    /// frames since play started.
+    audio_emit_cursor: u64,
+    /// Comp frame at which the current play span began. Combined with
+    /// `audio_emit_cursor` to compute absolute mix time.
+    audio_play_start_frame: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,7 +170,139 @@ impl FelxApp {
             pen: PenState::default(),
             help_open_for: None,
             current_project_path: None,
+            audio_playback: None,
+            audio_sources: Vec::new(),
+            audio_bus_dirty: true,
+            audio_emit_cursor: 0,
+            audio_play_start_frame: 0,
         })
+    }
+
+    /// Decode every `LayerKind::Audio` asset in the current comp and build
+    /// the mixer's source list. Called when the audio layer set changes
+    /// or before the first play. The decoded buffers are cached so
+    /// playback doesn't redo the decode on every loop iteration.
+    fn rebuild_audio_sources(&mut self) {
+        use felx_core::media::AudioSource;
+        use felx_core::model::{Curve, Frame as FelxFrame, LayerKind};
+        let comp = match self.project.composition(self.comp_id) {
+            Some(c) => c,
+            None => return,
+        };
+        let framerate = comp.framerate;
+        let mut sources: Vec<AudioSource> = Vec::new();
+        for layer in &comp.layers {
+            let LayerKind::Audio { asset } = &layer.kind else {
+                continue;
+            };
+            let Some(asset_meta) = self.project.asset(*asset) else {
+                continue;
+            };
+            let decoded = match felx_media::decode_file(&asset_meta.path, 48_000) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(path = ?asset_meta.path, error = %e, "audio decode failed");
+                    continue;
+                }
+            };
+            // Pad with leading silence so the layer's in_frame aligns with
+            // the mix window's time-zero (which is the comp's frame 0).
+            let in_secs = FelxFrame(layer.in_frame).to_time(framerate).as_seconds();
+            let pad_frames = (in_secs * decoded.sample_rate as f64).round() as usize;
+            let pad_samples = pad_frames * decoded.channels as usize;
+            let mut pcm = Vec::with_capacity(pad_samples + decoded.pcm.len());
+            pcm.resize(pad_samples, 0.0);
+            pcm.extend_from_slice(&decoded.pcm);
+            sources.push(AudioSource {
+                sample_rate: decoded.sample_rate,
+                channels: decoded.channels,
+                pcm,
+                gain: Curve::Static(1.0),
+                pan: Curve::Static(0.0),
+            });
+        }
+        info!(layers = sources.len(), "audio sources rebuilt");
+        self.audio_sources = sources;
+        self.audio_bus_dirty = false;
+    }
+
+    /// Per-update tick — keep the audio output buffer fed while playing.
+    /// Drops the playback (and therefore the cpal stream) on pause / stop
+    /// so we don't burn an audio device when idle.
+    fn drive_audio(&mut self) {
+        if !self.playhead.is_playing() {
+            // Pause / stop: drop the stream, reset cursor.
+            if self.audio_playback.is_some() {
+                self.audio_playback = None;
+            }
+            return;
+        }
+
+        // First play tick after a (re)start: rebuild sources if dirty,
+        // anchor the audio cursor to the current playhead frame.
+        if self.audio_playback.is_none() {
+            if self.audio_bus_dirty {
+                self.rebuild_audio_sources();
+            }
+            let clock = std::sync::Arc::new(felx_core::media::AudioClock::new(48_000));
+            match crate::audio_playback::AudioPlayback::new(clock) {
+                Ok(p) => {
+                    self.audio_playback = Some(p);
+                    self.audio_play_start_frame = self.playhead.current_frame();
+                    self.audio_emit_cursor = 0;
+                }
+                Err(e) => {
+                    warn!(error = %e, "audio playback init failed; rendering will be silent");
+                    return;
+                }
+            }
+        }
+
+        if self.audio_sources.is_empty() {
+            return;
+        }
+
+        let comp = self.project.composition(self.comp_id).expect("comp");
+        let framerate = comp.framerate;
+        let master_rate = 48_000u32;
+        let chunk_frames = 4096usize;
+        // Keep ~6 chunks ahead so a missed update tick doesn't underrun.
+        let target_queue_samples = chunk_frames * 2 * 6;
+
+        let Some(playback) = self.audio_playback.as_ref() else {
+            return;
+        };
+        while playback.queued() < target_queue_samples {
+            // Compute the time at which this chunk starts. Audio cursor is
+            // master-rate frames since play start; comp time = play-start
+            // frame + cursor / master_rate (in seconds), expressed as the
+            // mixer's Rational time.
+            let secs_since_start = self.audio_emit_cursor as f64 / master_rate as f64;
+            let start_frame_secs = FelxFrame(self.audio_play_start_frame)
+                .to_time(framerate)
+                .as_seconds();
+            let abs_secs = start_frame_secs + secs_since_start;
+            let den: u32 = master_rate;
+            let num = (abs_secs * den as f64).round().max(0.0) as u32;
+            let time = felx_core::model::Rational::new(num, den);
+
+            // Stop emitting once we've passed the comp duration so
+            // playback doesn't loop the master-bus reads indefinitely.
+            let comp_duration_secs = comp.duration_frames as f64 / framerate.as_fps();
+            if abs_secs >= comp_duration_secs {
+                break;
+            }
+
+            let mixed = felx_core::media::mix_window(
+                &self.audio_sources,
+                time,
+                master_rate,
+                chunk_frames,
+                1.0,
+            );
+            playback.enqueue(&mixed.pcm);
+            self.audio_emit_cursor += chunk_frames as u64;
+        }
     }
 
     /// Open a file dialog and import a media file as a new layer of the
@@ -184,6 +331,22 @@ impl FelxApp {
             return;
         };
         let asset_id = self.project.add_asset(path.clone(), kind);
+
+        // If we're importing a video, probe for an audio stream and add a
+        // parallel Audio asset + layer when one's present. Imported clips
+        // with sound then just work — no second "Import Audio" step.
+        let extra_audio_asset = if matches!(kind, AssetKind::Video) {
+            match felx_media::probe_audio(&path) {
+                Ok(_) => {
+                    info!(path = ?path, "video has audio stream; adding Audio layer");
+                    Some(self.project.add_asset(path.clone(), AssetKind::Audio))
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         let Some(comp) = self.project.composition_mut(self.comp_id) else {
             return;
         };
@@ -197,10 +360,20 @@ impl FelxApp {
             AssetKind::Video => felx_core::model::LayerKind::Video { asset: asset_id },
             AssetKind::Audio => felx_core::model::LayerKind::Audio { asset: asset_id },
         };
-        let id = comp.add_layer(label, layer_kind, 0, dur);
+        let id = comp.add_layer(label.clone(), layer_kind, 0, dur);
+        if let Some(audio_asset) = extra_audio_asset {
+            comp.add_layer(
+                format!("{label} (audio)"),
+                felx_core::model::LayerKind::Audio { asset: audio_asset },
+                0,
+                dur,
+            );
+        }
         self.selected_layer = Some(id);
         self.render_dirty = true;
         self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
+        // Mark the audio bus stale so the playback loop re-decodes on next play.
+        self.audio_bus_dirty = true;
         info!(asset = ?path, kind = ?kind, "imported media");
     }
 
@@ -225,6 +398,8 @@ impl FelxApp {
                 self.current_project_path = Some(path);
                 self.render_dirty = true;
                 self.compositor.cache_mut().clear();
+                self.audio_bus_dirty = true;
+                self.audio_playback = None;
                 info!(path = ?self.current_project_path, "project loaded");
             }
             Err(e) => {
@@ -339,6 +514,10 @@ impl FelxApp {
         }
         if moved {
             self.render_dirty = true;
+            // Any seek / step / scrub drops the audio stream so the next
+            // play tick rebuilds from the new playhead. Otherwise the
+            // queue would keep playing the *old* timeline position.
+            self.audio_playback = None;
         }
     }
 
@@ -582,11 +761,21 @@ impl FelxApp {
                 LayerAction::ImportVideo => self.import_media(AssetKind::Video),
                 LayerAction::ImportAudio => self.import_media(AssetKind::Audio),
                 LayerAction::Delete(id) => {
+                    let was_audio = self
+                        .project
+                        .composition(self.comp_id)
+                        .and_then(|c| c.layer(id))
+                        .map(|l| matches!(l.kind, felx_core::model::LayerKind::Audio { .. }))
+                        .unwrap_or(false);
                     if let Some(comp) = self.project.composition_mut(self.comp_id) {
                         comp.remove_layer(id);
                     }
                     if self.selected_layer == Some(id) {
                         self.selected_layer = None;
+                    }
+                    if was_audio {
+                        self.audio_bus_dirty = true;
+                        self.audio_playback = None;
                     }
                 }
                 LayerAction::MoveUp(id) => {
@@ -611,6 +800,41 @@ impl FelxApp {
                         && let Some(layer) = comp.layer_mut(id)
                     {
                         layer.time_scale = scale;
+                    }
+                }
+                LayerAction::SetCompWidth(w) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.width = w;
+                    }
+                }
+                LayerAction::SetCompHeight(h) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.height = h;
+                    }
+                }
+                LayerAction::SetCompFramerate(num, den) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.framerate = felx_core::model::Framerate::new(num, den);
+                        self.playhead.set_framerate_fps(comp.framerate.as_fps());
+                    }
+                }
+                LayerAction::SetCompDurationFrames(d) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.duration_frames = d.max(1);
+                        // Push any layer's out_frame that exceeds the new
+                        // duration back to the new tail; otherwise they'd
+                        // become invisible without warning.
+                        for layer in comp.layers.iter_mut() {
+                            if layer.out_frame > comp.duration_frames {
+                                layer.out_frame = comp.duration_frames;
+                            }
+                        }
+                        self.playhead.set_duration_frames(comp.duration_frames);
+                    }
+                }
+                LayerAction::SetCompBackground(rgba) => {
+                    if let Some(comp) = self.project.composition_mut(self.comp_id) {
+                        comp.background = rgba;
                     }
                 }
             }
@@ -673,6 +897,10 @@ impl App for FelxApp {
         if self.playhead.tick() {
             self.render_dirty = true;
         }
+
+        // Audio: keep the output buffer fed while playing; drop the stream
+        // when paused. Cheap when there are no Audio layers.
+        self.drive_audio();
 
         // Top menu strip: file ops, preset selector, help.
         let mut chosen_preset: Option<usize> = None;
