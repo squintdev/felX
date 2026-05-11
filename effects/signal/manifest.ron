@@ -1,27 +1,185 @@
-// Signal — analog video signal emulation. v1: chroma blur + ringing + snow
-// + head-switching band. The full ntsc-rs adapter (CPU pass over the
-// `ntscrs` crate, exposing the entire NtscEffect parameter set) lands as a
-// follow-up that adds the rest of the artifact set.
+// Signal — F-071a: the full ntsc-rs adapter (CPU pass over the `ntscrs`
+// crate). Exposes the entire NtscEffect parameter surface: modulation,
+// scanline phase, chroma phase noise / error / delay, head switching,
+// tracking noise, FBM noise per stream, ringing, VHS tape errors.
+//
+// pass = cpu because ntsc-rs is signal-domain DSP with sequential
+// inter-row dependencies — not amenable to a single fragment shader.
 (
     id: "signal",
     display_name: "Signal",
     category: "Stylize",
     working_space: linear,
-    pass: gpu,
+    pass: cpu,
     parameters: [
-        (id: "chroma_blur", display_name: "Chroma Blur",
-         kind: Float(default: 0.4, range: (min: 0.0, max: 1.0))),
-        (id: "ringing_intensity", display_name: "Ringing",
-         kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
-        (id: "snow_intensity", display_name: "Snow",
-         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
-        (id: "composite_noise", display_name: "Composite Noise",
-         kind: Float(default: 0.1, range: (min: 0.0, max: 1.0))),
-        (id: "head_switch_height", display_name: "Head Switch Height",
-         kind: Float(default: 8.0, range: (min: 0.0, max: 64.0))),
-        (id: "head_switch_shift", display_name: "Head Switch Shift",
-         kind: Float(default: 4.0, range: (min: 0.0, max: 32.0))),
-        (id: "seed", display_name: "Seed",
+        (id: "random_seed", display_name: "Random Seed",
          kind: Int(default: 0, range: (min: 0, max: 1000000))),
+
+        // --- Modulation / phase ---
+        (id: "video_scanline_phase_shift_deg", display_name: "Scanline Phase Shift (deg)",
+         kind: Int(default: 180, range: (min: 0, max: 270))),
+        (id: "video_scanline_phase_shift_offset", display_name: "Scanline Phase Offset",
+         kind: Int(default: 0, range: (min: -8, max: 8))),
+        (id: "chroma_phase_noise_intensity", display_name: "Chroma Phase Noise",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+        (id: "chroma_phase_error", display_name: "Chroma Phase Error",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+        (id: "chroma_delay_horizontal", display_name: "Chroma Delay H",
+         kind: Float(default: 0.0, range: (min: -32.0, max: 32.0))),
+        (id: "chroma_delay_vertical", display_name: "Chroma Delay V",
+         kind: Int(default: 0, range: (min: -8, max: 8))),
+        (id: "chroma_vert_blend", display_name: "Chroma Vert Blend",
+         kind: Bool(default: true)),
+
+        // --- Filters ---
+        (id: "filter_type", display_name: "Filter Type",
+         kind: Enum(variants: [
+             (id: "butterworth", display_name: "Butterworth"),
+             (id: "constant_k",  display_name: "Constant-K"),
+         ], default: "butterworth")),
+        (id: "input_luma_filter", display_name: "Luma Filter",
+         kind: Enum(variants: [
+             (id: "notch", display_name: "Notch"),
+             (id: "box",   display_name: "Box"),
+             (id: "none",  display_name: "None"),
+         ], default: "notch")),
+        (id: "chroma_lowpass_in", display_name: "Chroma Lowpass In",
+         kind: Enum(variants: [
+             (id: "full",  display_name: "Full"),
+             (id: "light", display_name: "Light"),
+             (id: "none",  display_name: "None"),
+         ], default: "full")),
+        (id: "chroma_lowpass_out", display_name: "Chroma Lowpass Out",
+         kind: Enum(variants: [
+             (id: "full",  display_name: "Full"),
+             (id: "light", display_name: "Light"),
+             (id: "none",  display_name: "None"),
+         ], default: "full")),
+        (id: "chroma_demodulation", display_name: "Chroma Demodulation",
+         kind: Enum(variants: [
+             (id: "notch",          display_name: "Notch"),
+             (id: "box",            display_name: "Box"),
+             (id: "one_line_comb",  display_name: "1-Line Comb"),
+             (id: "two_line_comb",  display_name: "2-Line Comb"),
+         ], default: "notch")),
+        (id: "luma_smear", display_name: "Luma Smear",
+         kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
+        (id: "composite_sharpening", display_name: "Composite Sharpening",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 4.0))),
+
+        // --- Field / interlacing ---
+        (id: "use_field", display_name: "Field Mode",
+         kind: Enum(variants: [
+             (id: "interleaved_upper", display_name: "Interleaved (upper)"),
+             (id: "interleaved_lower", display_name: "Interleaved (lower)"),
+             (id: "alternating",       display_name: "Alternating"),
+             (id: "upper",             display_name: "Upper only"),
+             (id: "lower",             display_name: "Lower only"),
+             (id: "both",              display_name: "Both"),
+         ], default: "interleaved_upper")),
+
+        // --- Snow ---
+        (id: "snow_intensity", display_name: "Snow Intensity",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+        (id: "snow_anisotropy", display_name: "Snow Anisotropy",
+         kind: Float(default: 0.5, range: (min: 0.0, max: 1.0))),
+
+        // --- Noise sub-blocks ---
+        (id: "composite_noise", display_name: "Composite Noise",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "intensity", display_name: "Intensity",
+              kind: Float(default: 0.1, range: (min: 0.0, max: 1.0))),
+             (id: "frequency", display_name: "Frequency",
+              kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
+             (id: "detail",    display_name: "Detail",
+              kind: Int(default: 1, range: (min: 1, max: 5))),
+         ])),
+        (id: "luma_noise", display_name: "Luma Noise",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "intensity", display_name: "Intensity",
+              kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+             (id: "frequency", display_name: "Frequency",
+              kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
+             (id: "detail",    display_name: "Detail",
+              kind: Int(default: 1, range: (min: 1, max: 5))),
+         ])),
+        (id: "chroma_noise", display_name: "Chroma Noise",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "intensity", display_name: "Intensity",
+              kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+             (id: "frequency", display_name: "Frequency",
+              kind: Float(default: 0.05, range: (min: 0.0, max: 2.0))),
+             (id: "detail",    display_name: "Detail",
+              kind: Int(default: 1, range: (min: 1, max: 5))),
+         ])),
+
+        // --- Ringing ---
+        (id: "ringing", display_name: "Ringing",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "frequency", display_name: "Frequency",
+              kind: Float(default: 0.5, range: (min: 0.0, max: 1.0))),
+             (id: "power",     display_name: "Power",
+              kind: Float(default: 3.0, range: (min: 1.0, max: 16.0))),
+             (id: "intensity", display_name: "Intensity",
+              kind: Float(default: 0.5, range: (min: 0.0, max: 2.0))),
+         ])),
+
+        // --- Head switching ---
+        (id: "head_switching", display_name: "Head Switching",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "height",      display_name: "Height (px)",
+              kind: Int(default: 8, range: (min: 0, max: 64))),
+             (id: "offset",      display_name: "Offset",
+              kind: Int(default: 3, range: (min: -32, max: 32))),
+             (id: "horiz_shift", display_name: "Horizontal Shift",
+              kind: Float(default: 72.0, range: (min: -128.0, max: 128.0))),
+         ])),
+
+        // --- Tracking noise (the band along the bottom of the picture) ---
+        (id: "tracking_noise", display_name: "Tracking Noise",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "height",          display_name: "Height (px)",
+              kind: Int(default: 24, range: (min: 0, max: 96))),
+             (id: "wave_intensity",  display_name: "Wave Intensity",
+              kind: Float(default: 5.0, range: (min: 0.0, max: 32.0))),
+             (id: "snow_intensity",  display_name: "Snow",
+              kind: Float(default: 0.05, range: (min: 0.0, max: 1.0))),
+             (id: "snow_anisotropy", display_name: "Snow Anisotropy",
+              kind: Float(default: 0.5, range: (min: 0.0, max: 1.0))),
+             (id: "noise_intensity", display_name: "Noise",
+              kind: Float(default: 0.005, range: (min: 0.0, max: 1.0))),
+         ])),
+
+        // --- VHS tape errors ---
+        (id: "vhs_settings", display_name: "VHS Tape",
+         kind: OptionalGroup(default_enabled: false, parameters: [
+             (id: "tape_speed", display_name: "Tape Speed",
+              kind: Enum(variants: [
+                  (id: "sp",  display_name: "SP"),
+                  (id: "lp",  display_name: "LP"),
+                  (id: "ep",  display_name: "EP"),
+                  (id: "off", display_name: "Off"),
+              ], default: "sp")),
+             (id: "chroma_loss", display_name: "Chroma Loss",
+              kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+             (id: "sharpen", display_name: "Sharpen",
+              kind: OptionalGroup(default_enabled: true, parameters: [
+                  (id: "intensity", display_name: "Intensity",
+                   kind: Float(default: 1.5, range: (min: 0.0, max: 8.0))),
+                  (id: "frequency", display_name: "Frequency",
+                   kind: Float(default: 1.0, range: (min: 0.0, max: 4.0))),
+              ])),
+             (id: "edge_wave", display_name: "Edge Wave",
+              kind: OptionalGroup(default_enabled: true, parameters: [
+                  (id: "intensity", display_name: "Intensity",
+                   kind: Float(default: 1.0, range: (min: 0.0, max: 16.0))),
+                  (id: "speed",     display_name: "Speed",
+                   kind: Float(default: 4.0, range: (min: 0.0, max: 16.0))),
+                  (id: "frequency", display_name: "Frequency",
+                   kind: Float(default: 0.05, range: (min: 0.0, max: 2.0))),
+                  (id: "detail",    display_name: "Detail",
+                   kind: Int(default: 1, range: (min: 1, max: 5))),
+              ])),
+         ])),
     ],
 )

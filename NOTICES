@@ -93,12 +93,13 @@ CC Toner — clean-room reimplementation of the Cycore CC effects bundle's
   derived from the publicly documented behavior. See
   effects.md § CC Toner for the algorithm breakdown.
 
-Signal — clean-room implementation. The full ntsc-rs adapter (deferred
-  follow-up F-071a) will depend on:
+Signal — F-071a landed; the effect is now a thin CPU-pass adapter over:
     ntsc-rs by valadaptive
       URL:     https://github.com/valadaptive/ntsc-rs
-      License: ntscrs core crate Apache-2.0; standalone GUI app GPL-3.0
-               (we depend only on the core crate).
+      License: ntscrs core crate licensed MIT OR ISC OR Apache-2.0
+               (we depend only on the core crate). The standalone GUI
+               app is GPL-3.0 and not consumed.
+  Pinned to a specific commit; see Cargo.toml workspace dep.
   ntsc-rs is itself a Rust port of zhuker/ntsc (Python) which derives
   from joncampbell123/composite-video-simulator (C++). Credit to the
   full lineage.

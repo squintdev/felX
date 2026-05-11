@@ -12,3 +12,5 @@ publish = false
 felx-core = { path = "../felx-core" }
 ffmpeg-next = { workspace = true }
 tracing = { workspace = true }
+ntscrs = { workspace = true }
+image = { workspace = true }

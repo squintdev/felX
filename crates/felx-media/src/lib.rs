@@ -6,6 +6,7 @@ pub mod decode;
 pub mod encode;
 pub mod error;
 pub mod info;
+pub mod signal_ntsc;
 
 pub use audio::{AudioInfo, CHANNELS, DEFAULT_SAMPLE_RATE, DecodedAudio, decode_file, probe_audio};
 pub use audio_export::{WavBitDepth, write_wav};

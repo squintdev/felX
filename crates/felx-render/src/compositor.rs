@@ -13,7 +13,10 @@ use crate::effects::crt_persistence::{CrtPersistence, CrtPersistenceParams};
 use crate::effects::gain::{Gain, GainParams};
 use crate::effects::invert::invert_in_place;
 use crate::effects::squint_diffusion::{self, DiffusionParams};
-use crate::effects::signal::{Signal, SignalParams};
+// Legacy Signal-Lite (WGSL approximation) — superseded by F-071a's
+// ntsc-rs CPU pass in `felx_media::signal_ntsc`. The pipeline file
+// (`crates/felx-render/src/effects/signal.rs`) stays around as
+// reference but is no longer wired into the compositor.
 use crate::effects::vhs::{Vhs, VhsParams};
 use crate::frame_cache::{CacheKey, FrameCache, hash_effect_stack};
 use crate::mask_pass::{MaskApply, rasterize_masks};
@@ -216,7 +219,6 @@ pub struct Compositor {
     renderer: Renderer,
     gain: Gain,
     cc_toner: CcToner,
-    signal: Signal,
     crt: Crt,
     crt_persistence: CrtPersistence,
     bloom: Bloom,
@@ -257,7 +259,6 @@ impl Compositor {
     pub fn with_cache_capacity(renderer: Renderer, cache_entries: usize) -> Self {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
-        let signal = Signal::new(&renderer, COMPOSITOR_FORMAT);
         let crt = Crt::new(&renderer, COMPOSITOR_FORMAT);
         let crt_persistence = CrtPersistence::new(&renderer, COMPOSITOR_FORMAT);
         let bloom = Bloom::new(&renderer, COMPOSITOR_FORMAT);
@@ -271,7 +272,6 @@ impl Compositor {
             renderer,
             gain,
             cc_toner,
-            signal,
             crt,
             crt_persistence,
             bloom,
@@ -773,7 +773,20 @@ impl Compositor {
                 Ok(output)
             }
             "cc_toner" => self.apply_cc_toner(eff, input, w, h),
-            "signal" => self.apply_signal(eff, input, w, h),
+            "signal" => {
+                // F-071a: real ntsc-rs algorithm via CPU pass. The legacy
+                // WGSL Signal-Lite path stays in the codebase (effects/
+                // signal/effect.wgsl + apply_signal below) but is no
+                // longer the dispatch target — leaving it there means
+                // hot-reload still has somewhere to write.
+                let values = eff.values.clone();
+                let frame = current_frame;
+                let output = run_cpu_pass(&self.renderer, &input, "signal_ntsc", move |img| {
+                    felx_media::signal_ntsc::apply_signal(img, &values, frame);
+                });
+                self.pool.release(input);
+                Ok(output)
+            }
             "squint_diffusion" => {
                 let params = build_diffusion_params(eff);
                 let output = run_cpu_pass(&self.renderer, &input, "squint_diffusion", |img| {
@@ -872,47 +885,6 @@ impl Compositor {
                     label: Some("compositor.vhs"),
                 });
         self.vhs
-            .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
-        self.renderer.queue().submit(Some(cmd.finish()));
-        self.pool.release(input);
-        Ok(output)
-    }
-
-    fn apply_signal(
-        &mut self,
-        eff: &Effect,
-        input: wgpu::Texture,
-        w: u32,
-        h: u32,
-    ) -> Result<wgpu::Texture, CompositorError> {
-        let chroma_blur = eff.values.float("chroma_blur").unwrap_or(0.4);
-        let ringing = eff.values.float("ringing_intensity").unwrap_or(0.5);
-        let snow = eff.values.float("snow_intensity").unwrap_or(0.0);
-        let composite_noise = eff.values.float("composite_noise").unwrap_or(0.1);
-        let head_h = eff.values.float("head_switch_height").unwrap_or(8.0);
-        let head_shift = eff.values.float("head_switch_shift").unwrap_or(4.0);
-        let seed = eff.values.int("seed").unwrap_or(0) as f32;
-        let params = SignalParams::new(
-            chroma_blur,
-            ringing,
-            snow,
-            composite_noise,
-            head_h,
-            head_shift,
-            seed,
-            [w as f32, h as f32],
-        );
-
-        let output = self.pool.acquire(&self.renderer, w, h, COMPOSITOR_FORMAT);
-        let in_view = input.create_view(&wgpu::TextureViewDescriptor::default());
-        let out_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut cmd =
-            self.renderer
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("compositor.signal"),
-                });
-        self.signal
             .render(&self.renderer, &mut cmd, &in_view, &out_view, params);
         self.renderer.queue().submit(Some(cmd.finish()));
         self.pool.release(input);

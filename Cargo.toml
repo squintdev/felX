@@ -32,6 +32,9 @@ notify = "8"
 ffmpeg-next = { package = "ffmpeg-the-third", version = "5" }
 cpal = "0.16"
 rfd = "0.16"
+# F-071a: the real ntsc-rs algorithm for the Signal effect. Not on
+# crates.io; pinned to a specific commit so the build is reproducible.
+ntscrs = { git = "https://github.com/valadaptive/ntsc-rs", package = "ntsc-rs", rev = "add90f5bf1bf7e3c573e4e945a16f44a82941b51" }
 
 [profile.release]
 lto = "thin"
