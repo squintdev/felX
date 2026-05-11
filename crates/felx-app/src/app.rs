@@ -79,6 +79,24 @@ pub struct FelxApp {
     /// Comp frame at which the current play span began. Combined with
     /// `audio_emit_cursor` to compute absolute mix time.
     audio_play_start_frame: u32,
+    /// In-flight rfd file dialog. We run `pick_file` on a background
+    /// thread so the egui update loop keeps pumping — otherwise the OS
+    /// flags the window as "not responding" while the user is browsing.
+    pending_file: Option<PendingFile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PendingFileKind {
+    ImportImage,
+    ImportVideo,
+    ImportAudio,
+    OpenProject,
+    SaveProjectAs,
+}
+
+struct PendingFile {
+    kind: PendingFileKind,
+    rx: std::sync::mpsc::Receiver<Option<PathBuf>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -175,7 +193,79 @@ impl FelxApp {
             audio_bus_dirty: true,
             audio_emit_cursor: 0,
             audio_play_start_frame: 0,
+            pending_file: None,
         })
+    }
+
+    /// Spawn a background thread that runs the rfd file dialog and sends
+    /// the chosen path (or `None` if the user cancelled) back through a
+    /// channel. The GUI poll loop picks it up via [`poll_pending_file`].
+    fn start_file_pick(&mut self, kind: PendingFileKind) {
+        if self.pending_file.is_some() {
+            return; // one dialog at a time
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match kind {
+                PendingFileKind::ImportImage => rfd::FileDialog::new()
+                    .add_filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "exr", "bmp", "tif", "tiff"],
+                    )
+                    .set_title("Import image")
+                    .pick_file(),
+                PendingFileKind::ImportVideo => rfd::FileDialog::new()
+                    .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
+                    .set_title("Import video")
+                    .pick_file(),
+                PendingFileKind::ImportAudio => rfd::FileDialog::new()
+                    .add_filter(
+                        "Audio",
+                        &["wav", "mp3", "flac", "ogg", "aac", "m4a", "opus"],
+                    )
+                    .set_title("Import audio")
+                    .pick_file(),
+                PendingFileKind::OpenProject => rfd::FileDialog::new()
+                    .add_filter("felx project", &["felx"])
+                    .set_title("Open project")
+                    .pick_file(),
+                PendingFileKind::SaveProjectAs => rfd::FileDialog::new()
+                    .add_filter("felx project", &["felx"])
+                    .set_title("Save project")
+                    .save_file(),
+            };
+            let _ = tx.send(result);
+        });
+        self.pending_file = Some(PendingFile { kind, rx });
+    }
+
+    /// Poll the in-flight file pick (if any). Returns true if a result
+    /// was consumed this tick — caller can use that to flag a repaint.
+    fn poll_pending_file(&mut self) -> bool {
+        let Some(pending) = self.pending_file.as_ref() else {
+            return false;
+        };
+        let result = match pending.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_file = None;
+                return true;
+            }
+        };
+        let kind = pending.kind;
+        self.pending_file = None;
+        let Some(path) = result else {
+            return true; // user cancelled
+        };
+        match kind {
+            PendingFileKind::ImportImage => self.complete_import(path, AssetKind::Image),
+            PendingFileKind::ImportVideo => self.complete_import(path, AssetKind::Video),
+            PendingFileKind::ImportAudio => self.complete_import(path, AssetKind::Audio),
+            PendingFileKind::OpenProject => self.complete_open_project(path),
+            PendingFileKind::SaveProjectAs => self.complete_save_project(path),
+        }
+        true
     }
 
     /// Decode every `LayerKind::Audio` asset in the current comp and build
@@ -309,27 +399,20 @@ impl FelxApp {
     /// matching kind. The asset is registered against the project, then a
     /// layer is added to the current comp with sensible defaults: full
     /// duration for image/video, comp-aligned in/out for audio.
+    /// Kick off an import file dialog on a background thread. The actual
+    /// asset registration happens later via [`complete_import`] once the
+    /// dialog returns. Doing it asynchronously is what keeps the eframe
+    /// update loop pumping while the user browses for a file.
     fn import_media(&mut self, kind: AssetKind) {
-        let dialog = match kind {
-            AssetKind::Image => rfd::FileDialog::new()
-                .add_filter(
-                    "Images",
-                    &["png", "jpg", "jpeg", "exr", "bmp", "tif", "tiff"],
-                )
-                .set_title("Import image"),
-            AssetKind::Video => rfd::FileDialog::new()
-                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
-                .set_title("Import video"),
-            AssetKind::Audio => rfd::FileDialog::new()
-                .add_filter(
-                    "Audio",
-                    &["wav", "mp3", "flac", "ogg", "aac", "m4a", "opus"],
-                )
-                .set_title("Import audio"),
+        let pending = match kind {
+            AssetKind::Image => PendingFileKind::ImportImage,
+            AssetKind::Video => PendingFileKind::ImportVideo,
+            AssetKind::Audio => PendingFileKind::ImportAudio,
         };
-        let Some(path) = dialog.pick_file() else {
-            return;
-        };
+        self.start_file_pick(pending);
+    }
+
+    fn complete_import(&mut self, path: PathBuf, kind: AssetKind) {
         let asset_id = self.project.add_asset(path.clone(), kind);
 
         // If we're importing a video, probe for an audio stream and add a
@@ -372,19 +455,15 @@ impl FelxApp {
         self.selected_layer = Some(id);
         self.render_dirty = true;
         self.compositor.cache_mut().invalidate_comp(self.comp_id.0);
-        // Mark the audio bus stale so the playback loop re-decodes on next play.
         self.audio_bus_dirty = true;
         info!(asset = ?path, kind = ?kind, "imported media");
     }
 
     fn open_project_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("felx project", &["felx"])
-            .set_title("Open project")
-            .pick_file()
-        else {
-            return;
-        };
+        self.start_file_pick(PendingFileKind::OpenProject);
+    }
+
+    fn complete_open_project(&mut self, path: PathBuf) {
         match Project::load(&path) {
             Ok(p) => {
                 let comp_id = p.compositions.first().map(|c| c.id).unwrap_or(self.comp_id);
@@ -408,20 +487,19 @@ impl FelxApp {
         }
     }
 
+    /// Save the project. If we know its file path, write straight back
+    /// (no dialog, no blocking). Otherwise spawn the Save-As dialog.
     fn save_project_dialog(&mut self) {
-        let path = match &self.current_project_path {
-            Some(p) => p.clone(),
-            None => {
-                let Some(picked) = rfd::FileDialog::new()
-                    .add_filter("felx project", &["felx"])
-                    .set_title("Save project")
-                    .save_file()
-                else {
-                    return;
-                };
-                picked
+        match &self.current_project_path {
+            Some(p) => {
+                let p = p.clone();
+                self.complete_save_project(p);
             }
-        };
+            None => self.start_file_pick(PendingFileKind::SaveProjectAs),
+        }
+    }
+
+    fn complete_save_project(&mut self, path: PathBuf) {
         match self.project.save(&path) {
             Ok(()) => {
                 self.current_project_path = Some(path.clone());
@@ -901,6 +979,17 @@ impl App for FelxApp {
         // Audio: keep the output buffer fed while playing; drop the stream
         // when paused. Cheap when there are no Audio layers.
         self.drive_audio();
+
+        // Drain any completed file dialog. Spawned on a background thread
+        // so the egui update loop never blocks waiting for the user to
+        // pick a file. While outstanding we tick at ~10 Hz so the channel
+        // is polled even when nothing else would dirty the UI.
+        if self.poll_pending_file() {
+            self.render_dirty = true;
+        }
+        if self.pending_file.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         // Top menu strip: file ops, preset selector, help.
         let mut chosen_preset: Option<usize> = None;
