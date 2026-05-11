@@ -35,6 +35,11 @@ pub struct RendererOptions {
     pub allow_software_fallback: bool,
     pub required_features: wgpu::Features,
     pub required_limits: wgpu::Limits,
+    /// Optional case-insensitive substring match on the adapter name.
+    /// Used by the GUI to honor a saved Export-GPU preference. `None` =
+    /// fall back to env var (`FELX_GPU`) then automatic discrete-prefer
+    /// logic.
+    pub gpu_name_pref: Option<String>,
 }
 
 impl Default for RendererOptions {
@@ -44,6 +49,7 @@ impl Default for RendererOptions {
             allow_software_fallback: false,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
+            gpu_name_pref: None,
         }
     }
 }
@@ -104,6 +110,7 @@ impl Renderer {
             &instance,
             opts.power_preference,
             opts.allow_software_fallback,
+            opts.gpu_name_pref.as_deref(),
         )
         .await?;
 
@@ -174,6 +181,7 @@ async fn request_adapter(
     instance: &wgpu::Instance,
     power: wgpu::PowerPreference,
     allow_software_fallback: bool,
+    settings_pref: Option<&str>,
 ) -> Result<wgpu::Adapter, RendererError> {
     // Log every adapter so users can see what's available and what we
     // picked from. Cheap and high-signal for "why is it using my iGPU?"
@@ -189,19 +197,26 @@ async fn request_adapter(
         );
     }
 
-    // 1) Explicit override by name substring.
-    if let Ok(want) = std::env::var("FELX_GPU")
-        && !want.is_empty()
-    {
+    // 1) Override by name substring. FELX_GPU env var first, then the
+    // caller-supplied preference (which the GUI threads through from its
+    // saved Settings).
+    let pref = std::env::var("FELX_GPU")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| settings_pref.map(str::to_string));
+    if let Some(want) = pref {
         let want_lower = want.to_lowercase();
         if let Some(a) = all
             .iter()
             .find(|a| a.get_info().name.to_lowercase().contains(&want_lower))
         {
-            info!(want, "FELX_GPU matched");
+            info!(want, "GPU preference matched");
             return Ok(clone_via_re_enumerate(instance, a.get_info()));
         }
-        warn!(want, "FELX_GPU set but no adapter matched; falling back");
+        warn!(
+            want,
+            "GPU preference set but no adapter matched; falling back"
+        );
     }
 
     // 2) Explicit backend override.

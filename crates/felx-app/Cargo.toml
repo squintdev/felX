@@ -23,3 +23,5 @@ wgpu = { workspace = true }
 notify = { workspace = true }
 cpal = { workspace = true }
 rfd = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }

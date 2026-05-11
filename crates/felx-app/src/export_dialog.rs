@@ -121,6 +121,9 @@ pub struct ExportOptions {
     pub gif_palette: u32,
     pub gif_dither: GifDither,
     pub wav_depth: WavBitDepth,
+    /// Threaded through to `RendererOptions::gpu_name_pref` when the
+    /// worker spawns its headless renderer. None = automatic selection.
+    pub gpu_name_pref: Option<String>,
 }
 
 impl Default for ExportOptions {
@@ -133,6 +136,7 @@ impl Default for ExportOptions {
             gif_palette: 128,
             gif_dither: GifDither::FloydSteinberg,
             wav_depth: WavBitDepth::Pcm16,
+            gpu_name_pref: None,
         }
     }
 }
@@ -229,6 +233,7 @@ fn run_export(
 
     let renderer = Renderer::new_headless(RendererOptions {
         allow_software_fallback: true,
+        gpu_name_pref: opts.gpu_name_pref.clone(),
         ..Default::default()
     })
     .map_err(|e| format!("renderer init: {e}"))?;

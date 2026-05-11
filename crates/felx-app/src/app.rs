@@ -91,6 +91,20 @@ pub struct FelxApp {
     export_job: Option<crate::export_dialog::ExportJob>,
     /// Latest progress for the running export.
     export_status: crate::export_dialog::ExportStatus,
+    /// Persisted user settings (loaded at startup, written on Settings save).
+    app_settings: crate::settings::Settings,
+    /// Cached enumeration of GPU adapters for the Settings dropdown.
+    /// Done once at startup; rebuilding requires opening another wgpu
+    /// instance which is fine but unnecessary every frame.
+    available_adapters: Vec<crate::settings::AdapterChoice>,
+    /// Settings dialog visibility.
+    settings_open: bool,
+    /// Live form values inside the Settings dialog. Committed to disk on
+    /// Save; discarded on Cancel.
+    settings_draft: crate::settings::Settings,
+    /// True when the user changed `viewer_gpu` and needs to restart for
+    /// the new GPU to take effect.
+    settings_restart_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,7 +167,10 @@ impl std::fmt::Display for AppInitError {
 impl std::error::Error for AppInitError {}
 
 impl FelxApp {
-    pub fn new(cc: &CreationContext<'_>) -> Result<Self, AppInitError> {
+    pub fn new(
+        cc: &CreationContext<'_>,
+        app_settings: crate::settings::Settings,
+    ) -> Result<Self, AppInitError> {
         let render_state = cc
             .wgpu_render_state
             .as_ref()
@@ -210,7 +227,148 @@ impl FelxApp {
             export_options: crate::export_dialog::ExportOptions::default(),
             export_job: None,
             export_status: crate::export_dialog::ExportStatus::default(),
+            settings_draft: app_settings.clone(),
+            app_settings,
+            available_adapters: crate::settings::list_adapters(),
+            settings_open: false,
+            settings_restart_required: false,
         })
+    }
+
+    fn show_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut window_open = true;
+        let mut do_save = false;
+        let mut do_cancel = false;
+        egui::Window::new("Settings")
+            .open(&mut window_open)
+            .resizable(false)
+            .default_width(500.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("GPU selection").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Persistent across launches. Stored in ~/.felx/settings.ron. \
+                         The FELX_GPU env var overrides these for the current session.",
+                    )
+                    .small()
+                    .color(Color32::from_gray(160)),
+                );
+                ui.add_space(6.0);
+
+                if self.available_adapters.is_empty() {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 120, 120),
+                        "(no GPU adapters detected)",
+                    );
+                    return;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Viewer GPU");
+                    let current = self.settings_draft.viewer_gpu.clone();
+                    let label = current.as_deref().unwrap_or("(automatic)").to_string();
+                    egui::ComboBox::from_id_salt("settings-viewer-gpu")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current.is_none(), "(automatic)")
+                                .clicked()
+                            {
+                                self.settings_draft.viewer_gpu = None;
+                            }
+                            for a in &self.available_adapters {
+                                let chosen = current
+                                    .as_deref()
+                                    .map(|s| a.name.contains(s))
+                                    .unwrap_or(false);
+                                if ui.selectable_label(chosen, a.label()).clicked() {
+                                    self.settings_draft.viewer_gpu = Some(a.name.clone());
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Viewer GPU change takes effect after restarting felx-app.",
+                    )
+                    .small()
+                    .color(Color32::from_gray(140)),
+                );
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Export GPU");
+                    let current = self.settings_draft.export_gpu.clone();
+                    let label = current.as_deref().unwrap_or("(automatic)").to_string();
+                    egui::ComboBox::from_id_salt("settings-export-gpu")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current.is_none(), "(automatic)")
+                                .clicked()
+                            {
+                                self.settings_draft.export_gpu = None;
+                            }
+                            for a in &self.available_adapters {
+                                let chosen = current
+                                    .as_deref()
+                                    .map(|s| a.name.contains(s))
+                                    .unwrap_or(false);
+                                if ui.selectable_label(chosen, a.label()).clicked() {
+                                    self.settings_draft.export_gpu = Some(a.name.clone());
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new("Export GPU change applies to the next export.")
+                        .small()
+                        .color(Color32::from_gray(140)),
+                );
+
+                if self.settings_restart_required {
+                    ui.add_space(6.0);
+                    ui.colored_label(
+                        Color32::from_rgb(255, 220, 80),
+                        "Restart felx-app for the viewer GPU change to take effect.",
+                    );
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        do_save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+
+        if do_save {
+            // Did the viewer pref change? Flag a restart hint.
+            if self.settings_draft.viewer_gpu != self.app_settings.viewer_gpu {
+                self.settings_restart_required = true;
+            }
+            match self.settings_draft.save() {
+                Ok(()) => {
+                    info!(viewer = ?self.settings_draft.viewer_gpu,
+                          export = ?self.settings_draft.export_gpu,
+                          "settings saved");
+                    self.app_settings = self.settings_draft.clone();
+                }
+                Err(e) => {
+                    warn!(error = %e, "settings save failed");
+                }
+            }
+        }
+        if do_cancel || !window_open {
+            self.settings_draft = self.app_settings.clone();
+            self.settings_open = false;
+        }
     }
 
     /// Spawn a background thread that runs the rfd file dialog and sends
@@ -482,11 +640,11 @@ impl FelxApp {
     }
 
     fn start_export(&mut self) {
-        let job = crate::export_dialog::spawn_export(
-            self.project.clone(),
-            self.comp_id,
-            self.export_options.clone(),
-        );
+        // Honor the saved Export GPU preference. Env var still wins
+        // inside `Renderer::new_headless` if set.
+        let mut opts = self.export_options.clone();
+        opts.gpu_name_pref = self.app_settings.export_gpu.clone();
+        let job = crate::export_dialog::spawn_export(self.project.clone(), self.comp_id, opts);
         match job {
             Ok(job) => {
                 self.export_status = crate::export_dialog::ExportStatus::default();
@@ -1348,6 +1506,12 @@ impl App for FelxApp {
                         do_export = true;
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("Settings…").clicked() {
+                        self.settings_draft = self.app_settings.clone();
+                        self.settings_open = true;
+                        ui.close();
+                    }
                 });
                 ui.separator();
                 ui.label("Presets:");
@@ -1401,6 +1565,9 @@ impl App for FelxApp {
         if let Some(id) = chosen_help {
             self.help_open_for = Some(id);
         }
+
+        // Settings modal.
+        self.show_settings_dialog(ctx);
 
         // Export dialog + running-job state.
         self.show_export_dialog(ctx);
