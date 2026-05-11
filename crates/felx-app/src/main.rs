@@ -12,6 +12,7 @@ mod audio_playback;
 mod autosave;
 mod crash_reporter;
 mod curve_widget;
+mod export_dialog;
 mod hot_reload;
 mod manifests;
 mod panels;

@@ -83,6 +83,14 @@ pub struct FelxApp {
     /// thread so the egui update loop keeps pumping — otherwise the OS
     /// flags the window as "not responding" while the user is browsing.
     pending_file: Option<PendingFile>,
+    /// Export modal visibility.
+    export_dialog_open: bool,
+    /// Live form values for the export modal.
+    export_options: crate::export_dialog::ExportOptions,
+    /// In-flight export worker (encoder + frame loop on a thread).
+    export_job: Option<crate::export_dialog::ExportJob>,
+    /// Latest progress for the running export.
+    export_status: crate::export_dialog::ExportStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +100,10 @@ enum PendingFileKind {
     ImportAudio,
     OpenProject,
     SaveProjectAs,
+    /// File picker for the Export dialog's "Output" field. The chosen
+    /// path lands on `export_options.out_path` rather than performing any
+    /// project mutation.
+    ExportOutput,
 }
 
 struct PendingFile {
@@ -194,6 +206,10 @@ impl FelxApp {
             audio_emit_cursor: 0,
             audio_play_start_frame: 0,
             pending_file: None,
+            export_dialog_open: false,
+            export_options: crate::export_dialog::ExportOptions::default(),
+            export_job: None,
+            export_status: crate::export_dialog::ExportStatus::default(),
         })
     }
 
@@ -233,6 +249,9 @@ impl FelxApp {
                     .add_filter("felx project", &["felx"])
                     .set_title("Save project")
                     .save_file(),
+                PendingFileKind::ExportOutput => {
+                    rfd::FileDialog::new().set_title("Export to…").save_file()
+                }
             };
             let _ = tx.send(result);
         });
@@ -264,8 +283,304 @@ impl FelxApp {
             PendingFileKind::ImportAudio => self.complete_import(path, AssetKind::Audio),
             PendingFileKind::OpenProject => self.complete_open_project(path),
             PendingFileKind::SaveProjectAs => self.complete_save_project(path),
+            PendingFileKind::ExportOutput => {
+                self.export_options.out_path = Some(path);
+            }
         }
         true
+    }
+
+    /// Render the Export modal. Closes either when the user cancels or
+    /// when an export starts. The progress bar window stays open
+    /// (separate state) while the worker runs.
+    fn show_export_dialog(&mut self, ctx: &egui::Context) {
+        use crate::export_dialog::ExportFormat;
+        if !self.export_dialog_open {
+            return;
+        }
+        let mut start = false;
+        let mut pick_path = false;
+        let mut cancel = false;
+        let mut window_open = true;
+        egui::Window::new("Export")
+            .open(&mut window_open)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let comp = self.project.composition(self.comp_id).expect("comp exists");
+                ui.label(format!(
+                    "{} — {}×{} @ {:.2} fps, {} frames",
+                    comp.name,
+                    comp.width,
+                    comp.height,
+                    comp.framerate.as_fps(),
+                    comp.duration_frames
+                ));
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    let current = self.export_options.format;
+                    egui::ComboBox::from_id_salt("export-format")
+                        .selected_text(current.label())
+                        .show_ui(ui, |ui| {
+                            for f in ExportFormat::ALL {
+                                if ui.selectable_label(f == current, f.label()).clicked() {
+                                    self.export_options.format = f;
+                                    // Reset output path when format changes — the file
+                                    // extension is wrong now.
+                                    self.export_options.out_path = None;
+                                }
+                            }
+                        });
+                });
+
+                // Per-format extra controls.
+                match self.export_options.format {
+                    ExportFormat::H264 | ExportFormat::H265 => {
+                        ui.horizontal(|ui| {
+                            ui.label("CRF");
+                            ui.add(
+                                egui::Slider::new(&mut self.export_options.crf, 0..=51)
+                                    .text("(lower = higher quality)"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Preset");
+                            egui::ComboBox::from_id_salt("export-preset")
+                                .selected_text(&self.export_options.preset)
+                                .show_ui(ui, |ui| {
+                                    for p in [
+                                        "ultrafast",
+                                        "superfast",
+                                        "veryfast",
+                                        "faster",
+                                        "fast",
+                                        "medium",
+                                        "slow",
+                                        "slower",
+                                        "veryslow",
+                                    ] {
+                                        if ui
+                                            .selectable_label(self.export_options.preset == p, p)
+                                            .clicked()
+                                        {
+                                            self.export_options.preset = p.to_string();
+                                        }
+                                    }
+                                });
+                        });
+                    }
+                    ExportFormat::Gif => {
+                        ui.horizontal(|ui| {
+                            ui.label("Palette");
+                            ui.add(
+                                egui::Slider::new(&mut self.export_options.gif_palette, 8..=256)
+                                    .text("colors"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Dither");
+                            use felx_render::gif_export::GifDither;
+                            for (label, value) in [
+                                ("None", GifDither::None),
+                                ("Bayer", GifDither::Bayer),
+                                ("Floyd–Steinberg", GifDither::FloydSteinberg),
+                                ("Sierra2-4A", GifDither::Sierra2_4a),
+                            ] {
+                                if ui
+                                    .selectable_label(
+                                        self.export_options.gif_dither == value,
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    self.export_options.gif_dither = value;
+                                }
+                            }
+                        });
+                    }
+                    ExportFormat::Wav => {
+                        ui.horizontal(|ui| {
+                            ui.label("Bit depth");
+                            use felx_media::WavBitDepth;
+                            for (label, value) in [
+                                ("16-bit PCM", WavBitDepth::Pcm16),
+                                ("24-bit PCM", WavBitDepth::Pcm24),
+                                ("32-bit float", WavBitDepth::Float32),
+                            ] {
+                                if ui
+                                    .selectable_label(self.export_options.wav_depth == value, label)
+                                    .clicked()
+                                {
+                                    self.export_options.wav_depth = value;
+                                }
+                            }
+                        });
+                    }
+                    ExportFormat::Prores422
+                    | ExportFormat::Prores4444
+                    | ExportFormat::PngSequence
+                    | ExportFormat::ExrSequence => {}
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Output");
+                    let display = self
+                        .export_options
+                        .out_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(none — click \"Choose…\")".into());
+                    ui.label(
+                        egui::RichText::new(display)
+                            .color(Color32::from_gray(180))
+                            .monospace(),
+                    );
+                    if ui.button("Choose…").clicked() {
+                        pick_path = true;
+                    }
+                });
+
+                ui.separator();
+                let ready = self.export_options.out_path.is_some();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(ready, egui::Button::new("Export")).clicked() {
+                        start = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if !ready {
+                        ui.label(
+                            egui::RichText::new("(pick an output path first)")
+                                .small()
+                                .color(Color32::from_gray(150)),
+                        );
+                    }
+                });
+            });
+        if pick_path {
+            self.start_file_pick(PendingFileKind::ExportOutput);
+        }
+        if start {
+            self.export_dialog_open = false;
+            self.start_export();
+        } else if cancel || !window_open {
+            self.export_dialog_open = false;
+        }
+    }
+
+    fn start_export(&mut self) {
+        let job = crate::export_dialog::spawn_export(
+            self.project.clone(),
+            self.comp_id,
+            self.export_options.clone(),
+        );
+        match job {
+            Ok(job) => {
+                self.export_status = crate::export_dialog::ExportStatus::default();
+                self.export_job = Some(job);
+                info!("export started");
+            }
+            Err(e) => {
+                warn!(error = %e, "export failed to start");
+                self.export_status = crate::export_dialog::ExportStatus {
+                    done: 0,
+                    total: 0,
+                    finished: true,
+                    error: Some(e),
+                };
+            }
+        }
+    }
+
+    /// Drain export progress messages. Run every update tick.
+    fn poll_export(&mut self) {
+        use crate::export_dialog::ExportProgress;
+        let Some(job) = self.export_job.as_ref() else {
+            return;
+        };
+        loop {
+            match job.rx.try_recv() {
+                Ok(ExportProgress::Started { total_frames }) => {
+                    self.export_status.total = total_frames;
+                }
+                Ok(ExportProgress::Frame { done, total }) => {
+                    self.export_status.done = done;
+                    self.export_status.total = total;
+                }
+                Ok(ExportProgress::Done) => {
+                    self.export_status.finished = true;
+                    self.export_status.error = None;
+                    self.export_job = None;
+                    info!("export complete");
+                    break;
+                }
+                Ok(ExportProgress::Failed(e)) => {
+                    self.export_status.finished = true;
+                    self.export_status.error = Some(e);
+                    self.export_job = None;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if !self.export_status.finished {
+                        self.export_status.finished = true;
+                        self.export_status.error =
+                            Some("export worker disconnected unexpectedly".into());
+                    }
+                    self.export_job = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Floating progress window for an in-flight or just-finished export.
+    fn show_export_progress(&mut self, ctx: &egui::Context) {
+        if self.export_job.is_none() && self.export_status.finished {
+            // Show a one-shot "done" toast until the user dismisses it.
+            let mut keep = true;
+            egui::Window::new("Export — done")
+                .open(&mut keep)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    if let Some(err) = self.export_status.error.as_deref() {
+                        ui.colored_label(Color32::from_rgb(255, 120, 120), err);
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Export complete.")
+                                .color(Color32::from_rgb(120, 220, 140)),
+                        );
+                    }
+                });
+            if !keep {
+                self.export_status = crate::export_dialog::ExportStatus::default();
+            }
+            return;
+        }
+        if self.export_job.is_none() {
+            return;
+        }
+        egui::Window::new("Export — running")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::ProgressBar::new(self.export_status.pct()).text(format!(
+                        "{}/{}",
+                        self.export_status.done, self.export_status.total
+                    )),
+                );
+                ui.label(
+                    egui::RichText::new("(export runs on a worker thread; you can keep editing)")
+                        .small()
+                        .color(Color32::from_gray(150)),
+                );
+            });
     }
 
     /// Decode every `LayerKind::Audio` asset in the current comp and build
@@ -1003,6 +1318,7 @@ impl App for FelxApp {
         let mut do_open = false;
         let mut do_save = false;
         let mut do_save_as = false;
+        let mut do_export = false;
         TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
@@ -1016,6 +1332,11 @@ impl App for FelxApp {
                     }
                     if ui.button("Save project as…").clicked() {
                         do_save_as = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Export…").clicked() {
+                        do_export = true;
                         ui.close();
                     }
                 });
@@ -1050,11 +1371,34 @@ impl App for FelxApp {
             self.current_project_path = None;
             self.save_project_dialog();
         }
+        if do_export {
+            // Seed a sensible default filename from the comp name so the
+            // file picker proposes something useful when the user clicks
+            // Choose…
+            let comp_name = self
+                .project
+                .composition(self.comp_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "export".into());
+            if self.export_options.out_path.is_none() {
+                self.export_options.out_path = None; // user picks via dialog
+                let _ = comp_name; // hint for default filename — used by export thread later
+            }
+            self.export_dialog_open = true;
+        }
         if let Some(i) = chosen_preset {
             self.apply_preset(i);
         }
         if let Some(id) = chosen_help {
             self.help_open_for = Some(id);
+        }
+
+        // Export dialog + running-job state.
+        self.show_export_dialog(ctx);
+        self.poll_export();
+        self.show_export_progress(ctx);
+        if self.export_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         // Help window: load the effect's README on demand.
