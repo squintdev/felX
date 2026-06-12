@@ -912,9 +912,48 @@ impl FelxApp {
             None
         };
 
+        // For a video import, size the comp's timeline to the clip
+        // (AE-style "comp from footage"): the comp duration becomes the
+        // clip's length at the comp framerate, so exports don't trail off
+        // into a freeze-frame of the last decoded frame.
+        let probed_frames = if matches!(kind, AssetKind::Video) {
+            match felx_media::probe(&path) {
+                Ok(info) => {
+                    let fps = self
+                        .project
+                        .composition(self.comp_id)
+                        .map(|c| c.framerate.as_fps())
+                        .unwrap_or(30.0);
+                    let frames = (info.duration.as_secs_f64() * fps).round() as u32;
+                    (frames > 0).then_some(frames)
+                }
+                Err(e) => {
+                    warn!(path = ?path, error = %e, "video probe failed; keeping comp duration");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let Some(comp) = self.project.composition_mut(self.comp_id) else {
             return;
         };
+        if let Some(frames) = probed_frames {
+            let old = comp.duration_frames;
+            comp.duration_frames = frames;
+            for layer in comp.layers.iter_mut() {
+                if layer.out_frame > frames {
+                    // Shrinking: pull tails back so layers stay valid.
+                    layer.out_frame = frames;
+                } else if layer.out_frame == old {
+                    // Growing: layers that ran to the old tail (the default
+                    // background solid) keep running to the new tail.
+                    layer.out_frame = frames;
+                }
+            }
+            self.playhead.set_duration_frames(frames);
+        }
         let dur = comp.duration_frames;
         let label = path
             .file_name()

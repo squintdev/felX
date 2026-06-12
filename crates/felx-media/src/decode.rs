@@ -108,25 +108,42 @@ pub struct FfmpegDecoder {
     /// (num, den) seconds-per-tick for the video stream's PTS values.
     time_base: (i32, i32),
     scaler: Option<scaling::Context>,
-    /// Input description the cached scaler was built for. Hwaccel decode
-    /// changes the frame format mid-stream (decoder reports e.g. `vaapi`
-    /// while the transferred software frame is `nv12`), so the scaler must
-    /// track the actual frame being scaled, not the decoder context.
-    scaler_input: Option<(ffmpeg::format::Pixel, u32, u32)>,
+    /// Input description + output dims the cached scaler was built for.
+    /// Hwaccel decode changes the frame format mid-stream (decoder reports
+    /// e.g. `vaapi` while the transferred software frame is `nv12`), so the
+    /// scaler must track the actual frame being scaled, not the decoder
+    /// context. Output dims change when the caller adjusts `output_size`
+    /// (preview-scale switches).
+    scaler_input: Option<(ffmpeg::format::Pixel, u32, u32, u32, u32)>,
+    /// Requested output dimensions for decoded frames. `None` = native.
+    /// Folding the resize into the YUV→RGBA sws pass is dramatically
+    /// cheaper than a separate CPU resize of the full-res RGBA frame.
+    output_size: Option<(u32, u32)>,
     hwaccel: HwaccelKind,
 }
 
 impl FfmpegDecoder {
+    /// Ask for decoded frames scaled to `size` (preserving nothing — the
+    /// caller owns aspect math). `None` restores native resolution. Takes
+    /// effect from the next decoded frame.
+    pub fn set_output_size(&mut self, size: Option<(u32, u32)>) {
+        self.output_size = size;
+    }
+
     fn build_scaler(&mut self, frame: &VideoFrame) -> Result<&mut scaling::Context, DecodeError> {
-        let input = (frame.format(), frame.width(), frame.height());
+        let (out_w, out_h) = self
+            .output_size
+            .map(|(w, h)| (w.max(1), h.max(1)))
+            .unwrap_or((frame.width(), frame.height()));
+        let input = (frame.format(), frame.width(), frame.height(), out_w, out_h);
         if self.scaler.is_none() || self.scaler_input != Some(input) {
             let ctx = scaling::Context::get(
                 input.0,
                 input.1,
                 input.2,
                 ffmpeg::format::Pixel::RGBA,
-                input.1,
-                input.2,
+                out_w,
+                out_h,
                 scaling::Flags::BILINEAR,
             )?;
             self.scaler = Some(ctx);
@@ -213,6 +230,7 @@ impl VideoDecoder for FfmpegDecoder {
             time_base,
             scaler: None,
             scaler_input: None,
+            output_size: None,
             hwaccel: actual_hwaccel,
         })
     }

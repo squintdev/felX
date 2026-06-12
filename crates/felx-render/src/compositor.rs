@@ -141,6 +141,19 @@ fn fit_into_canvas(img: RgbaImage, out_w: u32, out_h: u32) -> RgbaImage {
     canvas
 }
 
+/// Aspect-preserving fit of a `src_w`×`src_h` source into an
+/// `out_w`×`out_h` canvas. Returns `None` when any dimension is zero
+/// (caller keeps the decoder at native size).
+fn aspect_fit_dims(src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> Option<(u32, u32)> {
+    if src_w == 0 || src_h == 0 || out_w == 0 || out_h == 0 {
+        return None;
+    }
+    let scale = (out_w as f32 / src_w as f32).min(out_h as f32 / src_h as f32);
+    let w = ((src_w as f32 * scale).round() as u32).clamp(1, out_w);
+    let h = ((src_h as f32 * scale).round() as u32).clamp(1, out_h);
+    Some((w, h))
+}
+
 fn ffmpeg_error_invalid_data() -> ffmpeg_next::Error {
     ffmpeg_next::Error::InvalidData
 }
@@ -249,6 +262,11 @@ struct VideoDecoderEntry {
     /// playhead, multiple effects asking for the same source frame) is
     /// free.
     last_image: Option<RgbaImage>,
+    /// Output dims the decoder is currently scaling to. The decode-time
+    /// sws pass does the downscale (preview scales) so the CPU never
+    /// resizes a full-res RGBA frame; changes (preview-scale switch)
+    /// invalidate `last_image`.
+    target_size: Option<(u32, u32)>,
 }
 
 impl Compositor {
@@ -1233,10 +1251,26 @@ impl Compositor {
                     fps,
                     last_frame: None,
                     last_image: None,
+                    target_size: None,
                 },
             );
         }
         let entry = self.video_cache.get_mut(&key).expect("just inserted");
+
+        // Fold the fit-to-canvas resize into the decoder's sws pass: ask
+        // for frames already at the aspect-preserving target size so the
+        // CPU never resizes a full-res RGBA frame per playback frame.
+        let (src_w, src_h) = (entry.decoder.width(), entry.decoder.height());
+        let target = aspect_fit_dims(src_w, src_h, comp_w, comp_h);
+        if entry.target_size != target {
+            entry.decoder.set_output_size(target);
+            entry.target_size = target;
+            // The cached image is at the old size and the decoder's read
+            // position no longer matches anything usable at the new size;
+            // clearing both forces a clean seek + decode at the new dims.
+            entry.last_image = None;
+            entry.last_frame = None;
+        }
 
         // Repeat-frame fast path.
         if entry.last_frame == Some(source_frame)
