@@ -100,7 +100,7 @@ fn choose_viewer_adapter(
             .find(|a| a.get_info().name.to_lowercase().contains(&lower))
         {
             tracing::info!(want, "viewer adapter selected by preference");
-            return Ok(clone_adapter(adapters, a));
+            return Ok(a.clone());
         }
         tracing::warn!(want, "viewer-GPU preference set but nothing matched");
     }
@@ -111,7 +111,7 @@ fn choose_viewer_adapter(
         matches!(info.device_type, wgpu::DeviceType::DiscreteGpu)
             && !matches!(info.backend, wgpu::Backend::Gl)
     }) {
-        return Ok(clone_adapter(adapters, a));
+        return Ok(a.clone());
     }
 
     // 3) Any non-GL adapter.
@@ -119,38 +119,12 @@ fn choose_viewer_adapter(
         .iter()
         .find(|a| !matches!(a.get_info().backend, wgpu::Backend::Gl))
     {
-        return Ok(clone_adapter(adapters, a));
+        return Ok(a.clone());
     }
 
     // 4) Whatever's first.
     adapters
         .first()
-        .map(|a| clone_adapter(adapters, a))
+        .cloned()
         .ok_or_else(|| "no wgpu adapters available".to_string())
-}
-
-/// `wgpu::Adapter` doesn't implement `Clone`. The `native_adapter_selector`
-/// callback is handed a slice but must return an owned `Adapter`. Take
-/// ownership by re-enumerating from a fresh instance and finding the
-/// matching one by (name, vendor, device, backend).
-fn clone_adapter(adapters: &[wgpu::Adapter], target: &wgpu::Adapter) -> wgpu::Adapter {
-    let target_info = target.get_info();
-    let _ = adapters; // we re-enumerate to get an owned Adapter
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..Default::default()
-    });
-    let mut all = instance.enumerate_adapters(wgpu::Backends::all());
-    if let Some(idx) = all.iter().position(|a| {
-        let i = a.get_info();
-        i.name == target_info.name
-            && i.vendor == target_info.vendor
-            && i.device == target_info.device
-            && i.backend == target_info.backend
-    }) {
-        return all.swap_remove(idx);
-    }
-    all.into_iter()
-        .next()
-        .expect("at least one adapter must exist")
 }

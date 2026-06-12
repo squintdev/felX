@@ -94,6 +94,7 @@ impl ParamValue {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ParamValues {
     /// Dotted-id (`"head_switching.height"`) → value. BTreeMap so the
     /// on-disk RON form has stable ordering for diff readability.

@@ -108,22 +108,29 @@ pub struct FfmpegDecoder {
     /// (num, den) seconds-per-tick for the video stream's PTS values.
     time_base: (i32, i32),
     scaler: Option<scaling::Context>,
+    /// Input description the cached scaler was built for. Hwaccel decode
+    /// changes the frame format mid-stream (decoder reports e.g. `vaapi`
+    /// while the transferred software frame is `nv12`), so the scaler must
+    /// track the actual frame being scaled, not the decoder context.
+    scaler_input: Option<(ffmpeg::format::Pixel, u32, u32)>,
     hwaccel: HwaccelKind,
 }
 
 impl FfmpegDecoder {
-    fn build_scaler(&mut self) -> Result<&mut scaling::Context, DecodeError> {
-        if self.scaler.is_none() {
+    fn build_scaler(&mut self, frame: &VideoFrame) -> Result<&mut scaling::Context, DecodeError> {
+        let input = (frame.format(), frame.width(), frame.height());
+        if self.scaler.is_none() || self.scaler_input != Some(input) {
             let ctx = scaling::Context::get(
-                self.decoder.format(),
-                self.decoder.width(),
-                self.decoder.height(),
+                input.0,
+                input.1,
+                input.2,
                 ffmpeg::format::Pixel::RGBA,
-                self.decoder.width(),
-                self.decoder.height(),
+                input.1,
+                input.2,
                 scaling::Flags::BILINEAR,
             )?;
             self.scaler = Some(ctx);
+            self.scaler_input = Some(input);
         }
         Ok(self.scaler.as_mut().unwrap())
     }
@@ -205,6 +212,7 @@ impl VideoDecoder for FfmpegDecoder {
             stream_index,
             time_base,
             scaler: None,
+            scaler_input: None,
             hwaccel: actual_hwaccel,
         })
     }
@@ -278,7 +286,7 @@ impl VideoDecoder for FfmpegDecoder {
                     let frame_to_scale = hw_unwrapped.as_ref().unwrap_or(&decoded);
 
                     let pts = decoded.pts().unwrap_or(0);
-                    let scaler = self.build_scaler()?;
+                    let scaler = self.build_scaler(frame_to_scale)?;
                     let mut rgba = VideoFrame::empty();
                     scaler.run(frame_to_scale, &mut rgba)?;
 
