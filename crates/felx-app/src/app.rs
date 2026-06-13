@@ -1472,6 +1472,14 @@ impl FelxApp {
                 return;
             }
         };
+        // If the GPU hit OOM rendering this frame, the compositor shrank its
+        // cache budget; the texture we got is suspect. Drop it, repaint next
+        // tick — the re-render fits the reduced budget. The viewer can
+        // tolerate one stale frame; no need to block here re-rendering.
+        if self.compositor.recover_if_oom_nonblocking() {
+            self.render_dirty = true;
+            return;
+        }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut renderer = render_state.renderer.write();
         let id =

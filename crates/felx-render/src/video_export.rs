@@ -21,6 +21,12 @@ pub enum VideoExportError {
     Compositor(CompositorError),
     Audio(AudioExportError),
     Encode(DecodeError),
+    /// The GPU ran out of memory and kept doing so even after the cache
+    /// budget was ratcheted to its floor — the comp can't render at this
+    /// resolution on this device.
+    OutOfMemory {
+        frame: u32,
+    },
 }
 
 impl std::fmt::Display for VideoExportError {
@@ -30,6 +36,11 @@ impl std::fmt::Display for VideoExportError {
             VideoExportError::Compositor(e) => write!(f, "compositor: {e}"),
             VideoExportError::Audio(e) => write!(f, "audio: {e}"),
             VideoExportError::Encode(e) => write!(f, "encode: {e}"),
+            VideoExportError::OutOfMemory { frame } => write!(
+                f,
+                "GPU out of memory rendering frame {frame}, even at the minimum \
+                 cache budget — try a lower export resolution or free GPU memory"
+            ),
         }
     }
 }
@@ -83,7 +94,23 @@ pub fn export_video(
     // frame's end time so the muxer never has to buffer one stream deeply.
     let mut audio_cursor = 0usize; // interleaved f32 index
     for frame in 0..duration {
-        let tex = compositor.render_cached(project, comp_id, frame)?;
+        // Render with OOM recovery: if the GPU runs out of memory the
+        // compositor shrinks its cache budget and we re-render this frame
+        // (the prior attempt's texture is suspect). Bounded so a genuinely
+        // un-renderable resolution fails cleanly instead of looping.
+        const MAX_OOM_RETRIES: u32 = 6;
+        let mut attempts = 0;
+        let tex = loop {
+            let tex = compositor.render_cached(project, comp_id, frame)?;
+            if compositor.recover_if_oom() {
+                attempts += 1;
+                if attempts > MAX_OOM_RETRIES {
+                    return Err(VideoExportError::OutOfMemory { frame });
+                }
+                continue;
+            }
+            break tex;
+        };
         let img = download_image(compositor.renderer(), &tex);
         enc.write_rgba(img.as_raw())?;
 

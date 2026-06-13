@@ -4,7 +4,9 @@
 //! so we hold them by value here; cloning is cheap and avoids a redundant
 //! `Arc<Arc<...>>` layer when interoperating with eframe.
 
-use tracing::{info, warn};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{error, info, warn};
 
 #[derive(Clone, Debug)]
 pub struct AdapterInfo {
@@ -79,6 +81,39 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: AdapterInfo,
+    /// Set by the device's uncaptured-error handler when a GPU
+    /// out-of-memory error fires. The compositor polls this at frame
+    /// boundaries to shrink its cache and recover instead of letting the
+    /// error panic the thread. Shared (Arc) so clones observe the same flag.
+    oom: Arc<AtomicBool>,
+}
+
+/// True if an uncaptured wgpu error looks like an allocation failure.
+/// Some drivers report OOM as `Error::OutOfMemory`; others surface it as a
+/// `Validation` error whose description mentions memory (the case observed
+/// on this project: "In Device::create_texture ... Not enough memory left").
+fn is_out_of_memory(err: &wgpu::Error) -> bool {
+    match err {
+        wgpu::Error::OutOfMemory { .. } => true,
+        wgpu::Error::Validation { description, .. } | wgpu::Error::Internal { description, .. } => {
+            let d = description.to_ascii_lowercase();
+            d.contains("out of memory") || d.contains("not enough memory") || d.contains("oom")
+        }
+    }
+}
+
+/// Register an uncaptured-error handler that records OOM into `flag` rather
+/// than panicking. Non-OOM errors are logged at error level (they indicate
+/// real bugs) but no longer abort the process.
+fn install_oom_handler(device: &wgpu::Device, flag: Arc<AtomicBool>) {
+    device.on_uncaptured_error(Box::new(move |err: wgpu::Error| {
+        if is_out_of_memory(&err) {
+            warn!(error = %err, "GPU out of memory (uncaptured) — flagging for cache recovery");
+            flag.store(true, Ordering::SeqCst);
+        } else {
+            error!(error = %err, "uncaptured wgpu error");
+        }
+    }));
 }
 
 impl std::fmt::Debug for Renderer {
@@ -133,10 +168,14 @@ impl Renderer {
             .await
             .map_err(RendererError::DeviceRequest)?;
 
+        let oom = Arc::new(AtomicBool::new(false));
+        install_oom_handler(&device, oom.clone());
+
         Ok(Self {
             device,
             queue,
             info,
+            oom,
         })
     }
 
@@ -144,10 +183,13 @@ impl Renderer {
     /// `wgpu::Device` and `wgpu::Queue` are cheap to clone (internally
     /// reference-counted), so this takes them by value.
     pub fn from_borrowed(device: wgpu::Device, queue: wgpu::Queue, info: AdapterInfo) -> Self {
+        let oom = Arc::new(AtomicBool::new(false));
+        install_oom_handler(&device, oom.clone());
         Self {
             device,
             queue,
             info,
+            oom,
         }
     }
 
@@ -171,6 +213,29 @@ impl Renderer {
     pub fn allocated_bytes(&self) -> Option<u64> {
         let report = self.device.generate_allocator_report()?;
         Some(report.total_allocated_bytes)
+    }
+
+    /// Flush pending GPU work so any asynchronous uncaptured errors (e.g. an
+    /// allocation OOM) reach the handler before [`take_oom`](Self::take_oom)
+    /// is checked. Blocks until the device is idle.
+    pub fn poll_wait(&self) {
+        let _ = self.device.poll(wgpu::PollType::Wait);
+    }
+
+    /// Non-blocking poll: processes already-completed GPU work (and fires
+    /// any pending uncaptured-error callbacks) without stalling the caller.
+    /// For the realtime viewer, where a per-frame `Wait` would serialize the
+    /// pipeline; the OOM flag is sticky so a late catch only costs a frame.
+    pub fn poll_nonblocking(&self) {
+        let _ = self.device.poll(wgpu::PollType::Poll);
+    }
+
+    /// Atomically read and clear the out-of-memory flag set by the device's
+    /// uncaptured-error handler. Returns true if an OOM occurred since the
+    /// last call. Pair with [`poll_wait`](Self::poll_wait) so the flag
+    /// reflects work already submitted.
+    pub fn take_oom(&self) -> bool {
+        self.oom.swap(false, Ordering::SeqCst)
     }
 }
 

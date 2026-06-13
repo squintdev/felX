@@ -324,6 +324,42 @@ impl Compositor {
         &self.renderer
     }
 
+    /// Flush the GPU and, if an out-of-memory error fired during recent
+    /// work, shrink the frame cache's VRAM budget and drop its VRAM tier to
+    /// recover. Returns true if an OOM was handled — the caller should treat
+    /// the just-rendered frame as suspect and re-render it. This is the
+    /// adaptive VRAM cap: the budget ratchets down to whatever the running
+    /// GPU sustains, with no hardcoded per-card number.
+    pub fn recover_if_oom(&mut self) -> bool {
+        self.recover_if_oom_inner(true)
+    }
+
+    /// Like [`recover_if_oom`](Self::recover_if_oom) but uses a non-blocking
+    /// GPU poll — for the realtime viewer, where a per-frame `Wait` would
+    /// stall the pipeline. The OOM flag is sticky, so an OOM not seen this
+    /// frame is caught on the next.
+    pub fn recover_if_oom_nonblocking(&mut self) -> bool {
+        self.recover_if_oom_inner(false)
+    }
+
+    fn recover_if_oom_inner(&mut self, wait: bool) -> bool {
+        if wait {
+            self.renderer.poll_wait();
+        } else {
+            self.renderer.poll_nonblocking();
+        }
+        if self.renderer.take_oom() {
+            let new = self.cache.shrink_vram_budget();
+            warn!(
+                vram_budget_mb = new / (1024 * 1024),
+                "GPU out of memory — shrank frame-cache VRAM budget and cleared the VRAM tier"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn pool(&self) -> &TexturePool {
         &self.pool
     }

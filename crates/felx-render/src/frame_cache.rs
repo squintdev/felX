@@ -166,6 +166,10 @@ impl CacheStats {
 pub const DEFAULT_VRAM_BUDGET_BYTES: usize = 384 * 1024 * 1024;
 /// Default RAM spill budget — frames demoted out of VRAM live here.
 pub const DEFAULT_RAM_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// Floor the adaptive VRAM budget never drops below. Below this a single
+/// frame barely fits and the cache stops being useful; if the GPU still
+/// OOMs here, the render genuinely can't proceed at this resolution.
+pub const MIN_VRAM_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
 fn frame_bytes(width: u32, height: u32) -> usize {
     width as usize * height as usize * 4
@@ -342,6 +346,25 @@ impl FrameCache {
         self.ram.clear();
         self.vram_bytes = 0;
         self.ram_bytes = 0;
+    }
+
+    /// Halve the VRAM budget (floored at [`MIN_VRAM_BUDGET_BYTES`]) and drop
+    /// the entire VRAM tier to free GPU memory immediately. Called on a GPU
+    /// out-of-memory: this is the adaptive part — the budget self-tunes
+    /// down to what the running card can actually sustain, so the app isn't
+    /// pinned to a hardcoded number. Frames are *dropped*, not demoted to
+    /// RAM: a readback would allocate a staging buffer while already
+    /// memory-starved. Returns the new VRAM budget in bytes.
+    pub fn shrink_vram_budget(&mut self) -> usize {
+        self.max_vram_bytes = (self.max_vram_bytes / 2).max(MIN_VRAM_BUDGET_BYTES);
+        self.stats.evictions += self.entries.len() as u64;
+        self.entries.clear();
+        self.vram_bytes = 0;
+        self.max_vram_bytes
+    }
+
+    pub fn vram_budget(&self) -> usize {
+        self.max_vram_bytes
     }
 
     pub fn len(&self) -> usize {
@@ -587,6 +610,33 @@ mod tests {
         assert!(cache.get(k0, &r).is_some());
         assert_eq!(cache.stats().hits, 1);
         assert_eq!(cache.stats().misses, 0);
+    }
+
+    #[test]
+    fn shrink_vram_budget_halves_and_drops_to_floor() {
+        let mut cache = FrameCache::with_budget(64, 256 * 1024 * 1024, 0);
+        assert_eq!(cache.shrink_vram_budget(), 128 * 1024 * 1024);
+        assert_eq!(cache.shrink_vram_budget(), 64 * 1024 * 1024);
+        // Ratchets down but never below the floor.
+        for _ in 0..20 {
+            cache.shrink_vram_budget();
+        }
+        assert_eq!(cache.vram_budget(), MIN_VRAM_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn shrink_clears_vram_tier_without_readback() {
+        let Some(r) = try_renderer() else {
+            return;
+        };
+        // 1x1 fake textures have no COPY_SRC; shrink must NOT read them back
+        // (it drops, not demotes), so this must not panic.
+        let mut cache = FrameCache::with_budget(64, 256 * 1024 * 1024, 1024 * 1024);
+        cache.insert(CacheKey::new(1, 0, 0), fake_texture(&r, "a"), &r);
+        cache.insert(CacheKey::new(1, 1, 0), fake_texture(&r, "b"), &r);
+        cache.shrink_vram_budget();
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.vram_bytes(), 0);
     }
 
     #[test]
