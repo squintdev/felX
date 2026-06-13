@@ -202,10 +202,30 @@ pub fn spawn_export(
     let format = opts.format;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        if let Err(e) = run_export(project, comp_id, opts, &tx) {
-            let _ = tx.send(ExportProgress::Failed(e));
-        } else {
-            let _ = tx.send(ExportProgress::Done);
+        // A wgpu validation/OOM error panics rather than returning an Err.
+        // Without this guard a failed export unwinds the worker thread,
+        // drops the channel, and the GUI just sees the worker vanish with
+        // no message ("export worker left"). Catch it and report cleanly;
+        // the GUI keeps running and shows the error.
+        let tx2 = tx.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_export(project, comp_id, opts, &tx2)
+        }));
+        match result {
+            Ok(Ok(())) => {
+                let _ = tx.send(ExportProgress::Done);
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(ExportProgress::Failed(e));
+            }
+            Err(panic) => {
+                let msg = panic_message(&panic);
+                tracing::error!(error = %msg, "export worker panicked");
+                let _ = tx.send(ExportProgress::Failed(format!(
+                    "export crashed: {msg}. The GPU may be out of memory — \
+                     try a lower preview/export resolution or close other GPU apps."
+                )));
+            }
         }
     });
     Ok(ExportJob {
@@ -213,6 +233,17 @@ pub fn spawn_export(
         format,
         out_path,
     })
+}
+
+/// Pull a human-readable string out of a caught panic payload.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 fn run_export(
@@ -237,7 +268,18 @@ fn run_export(
         ..Default::default()
     })
     .map_err(|e| format!("renderer init: {e}"))?;
-    let mut compositor = Compositor::new(renderer);
+    // Export renders strictly forward, frame 0..dur, with no replay — a
+    // large frame cache buys nothing and, on a GPU shared with the live
+    // viewer, a 64-entry full-res cache is exactly what tips the card into
+    // out-of-memory. Keep a tiny VRAM footprint; spill is cheap here.
+    let mut compositor =
+        Compositor::with_cache_budget(renderer, 4, 64 * 1024 * 1024, 256 * 1024 * 1024);
+    if let Some(bytes) = compositor.renderer().allocated_bytes() {
+        tracing::info!(
+            allocated_mb = bytes / (1024 * 1024),
+            "export GPU allocation at start"
+        );
+    }
 
     let _ = tx.send(ExportProgress::Started { total_frames: dur });
 

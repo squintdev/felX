@@ -219,7 +219,10 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         ..Default::default()
     })
     .map_err(|e| format!("renderer init: {e}"))?;
-    let mut compositor = Compositor::new(renderer);
+    // Headless render is sequential (frame 0..dur, no replay), so a large
+    // frame cache only wastes VRAM. Small VRAM budget, generous RAM spill.
+    let mut compositor =
+        Compositor::with_cache_budget(renderer, 4, 64 * 1024 * 1024, 512 * 1024 * 1024);
 
     match format.as_str() {
         "h264" | "h265" => {

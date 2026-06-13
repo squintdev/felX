@@ -274,6 +274,20 @@ impl Compositor {
         Self::with_cache_capacity(renderer, 64)
     }
 
+    /// Build with explicit cache budgets. Use this for the export path,
+    /// which renders sequentially (no replay) and so wants a tiny VRAM
+    /// footprint — especially when it shares a GPU with the live viewer.
+    pub fn with_cache_budget(
+        renderer: Renderer,
+        cache_entries: usize,
+        max_vram_bytes: usize,
+        max_ram_bytes: usize,
+    ) -> Self {
+        let mut c = Self::with_cache_capacity(renderer, cache_entries);
+        c.cache = FrameCache::with_budget(cache_entries, max_vram_bytes, max_ram_bytes);
+        c
+    }
+
     pub fn with_cache_capacity(renderer: Renderer, cache_entries: usize) -> Self {
         let gain = Gain::new(&renderer, COMPOSITOR_FORMAT);
         let cc_toner = CcToner::new(&renderer, COMPOSITOR_FORMAT);
@@ -364,11 +378,15 @@ impl Compositor {
             return Err(CompositorError::NoVisibleLayer);
         }
         let key = Self::cache_key_multilayer(comp_id, frame, &visible, scale);
-        if let Some(tex) = self.cache.get(key) {
+        // Renderer is cheap to clone (Arc inside) and sidesteps borrowing
+        // `self.cache` mutably and `self.renderer` at the same time — the
+        // cache needs the renderer for the RAM-tier readback/upload path.
+        let renderer = self.renderer.clone();
+        if let Some(tex) = self.cache.get(key, &renderer) {
             return Ok(tex);
         }
         let tex = self.render_at(project, comp_id, frame, scale)?;
-        self.cache.insert(key, tex.clone());
+        self.cache.insert(key, tex.clone(), &renderer);
         Ok(tex)
     }
 

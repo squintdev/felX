@@ -162,6 +162,16 @@ impl Renderer {
     pub fn adapter_info(&self) -> &AdapterInfo {
         &self.info
     }
+
+    /// Best-effort count of bytes wgpu has allocated through this device's
+    /// internal allocator. wgpu exposes no total/free *device* VRAM query,
+    /// so this is what the app has allocated — not what the card has free.
+    /// Useful for logging how close the cache budget is tracking reality.
+    /// Returns `None` on backends without an allocator report (e.g. GL).
+    pub fn allocated_bytes(&self) -> Option<u64> {
+        let report = self.device.generate_allocator_report()?;
+        Some(report.total_allocated_bytes)
+    }
 }
 
 /// Pick the most-capable wgpu adapter we can find, with overrides:
