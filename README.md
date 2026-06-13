@@ -20,6 +20,7 @@ cargo run -p felx-app
 
 This opens a 1280×720 / 30fps default project with a slate-blue solid layer and a Gain effect on top. Things to try:
 
+- **Import a clip** (`Video` button in Layers) — the comp duration snaps to the clip's length, and a clip with sound gets a parallel Audio layer automatically.
 - **Click the layer** in the Layers panel (left), then dial the Gain slider in the Effects panel (right).
 - **Click the `⏱` stopwatch** next to a Float slider to convert it to an animated curve. Drag the slider at different playhead positions to add keyframes; an inline mini-curve appears below the slider.
 - **Toggle `▲ Graph`** in the bottom transport bar for the full graph editor across the comp duration. Shift-click for multi-select, `1`/`2`/`3`/`4`/`5` to set interp on the selection.
@@ -29,6 +30,7 @@ This opens a 1280×720 / 30fps default project with a slate-blue solid layer and
 - **Shift-drag on the viewer** to set a region of interest. **Esc** clears.
 - **Help menu** (top-right) → pick an effect to see its README in a popup.
 - **Space / ←/→** for play / step. **Hot reload**: edit `effects/gain/effect.wgsl` while the app is running and the change applies on save.
+- **File → Export…** renders to H.264 / H.265 / ProRes / GIF / PNG / EXR / WAV on a background thread. Video formats mux the comp's audio automatically when Audio layers exist.
 
 If you don't have a GPU at all, prefix with `FELX_SOFTWARE_GPU=1`:
 
@@ -51,9 +53,9 @@ cargo run -p felx-cli -- render path/to/project.felx --out frames/ --format png 
 cargo run -p felx-cli -- render path/to/project.felx --out master.wav --format wav --wav-depth 24
 ```
 
-`felx help` lists every flag.
+`felx help` lists every flag. Video formats (h264 / h265 / prores) mux the comp's audio when the project has Audio layers.
 
-The repo doesn't currently ship example `.felx` files (the GUI's default project is in-memory only). To produce one for the CLI, run the GUI, set up a comp, and use `Project::save` from a quick test or `cargo run -p felx-cli` after wiring a save command — for now the easiest path to a `.felx` is to write one by hand or via a small `cargo run --example` snippet. (A `felx new` subcommand is on the polish list.)
+The repo doesn't ship example `.felx` files. To make one, run the GUI, set up a comp, and **File → Save project**; the CLI renders that file headlessly. (A `felx new` subcommand is on the polish list.)
 
 ## Test
 
@@ -117,7 +119,6 @@ felx-app     `felx-app` GUI — eframe host, shares its wgpu device with the
 ## See also
 
 - [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — keyboard shortcuts, effect catalog, render formats, troubleshooting.
-- [`CLAUDE.md`](CLAUDE.md) — codebase tour for contributors.
 - [`docs/decisions/`](docs/decisions/) — ADRs (project file format → RON, UI framework → egui).
 - [`NOTICES`](NOTICES) — third-party attribution.
 
