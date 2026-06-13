@@ -33,10 +33,12 @@ desktop.ini
 # Project-specific (from the planned auto-save format, F-113)
 *.felx.autosave
 
-# Planning docs (kept local, not committed)
+# Planning / AI-assistant docs (kept local, not committed)
 PRD.md
 effects.md
 felx-mvp-epic.md
+CLAUDE.md
+claudedocs/
 
 # Environment / secrets
 .env
