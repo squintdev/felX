@@ -104,12 +104,11 @@ Signal — F-071a landed; the effect is now a thin CPU-pass adapter over:
   from joncampbell123/composite-video-simulator (C++). Credit to the
   full lineage.
 
-SquintDiffusion — algorithm inspired by David van Brink's SquintDiffusion
-  AE plugin ((link removed)), which is
-  "Thanksware" (free for any use, attribution requested). Floyd-Steinberg
-  error diffusion (1976) is the underlying algorithm and is unencumbered.
-  Credit to van Brink for the directional-scan twist that gives the
-  effect its recognizable look.
+SquintDiffusion — Floyd-Steinberg error diffusion (1976) is the
+  underlying algorithm and is unencumbered. The directional-scan twist
+  that gives the effect its recognizable look follows prior art by
+  David van Brink ("Thanksware" AE plugin — free for any use,
+  attribution requested; no code copied).
 
 CRT — informed by the open-source CRT-shader community. Specific
   references read for technique (no code copied):

@@ -1,6 +1,6 @@
 # SquintDiffusion
 
-Directional error-diffusion halftoning. Floyd–Steinberg distributes quantization error to neighboring pixels; the directional-scan twist (credit: David van Brink's SquintDiffusion AE plugin) is what gives the effect its recognizable look.
+Directional error-diffusion halftoning. Floyd–Steinberg distributes quantization error to neighboring pixels; a directional-scan twist (see NOTICES for prior art) gives the effect its recognizable look.
 
 | Parameter | Type | Default | Range | Notes |
 |---|---|---|---|---|

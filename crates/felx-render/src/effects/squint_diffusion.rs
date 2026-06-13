@@ -106,7 +106,8 @@ mod tests {
         // Mid-gray ramp through a black/white palette should produce a
         // mix of black and white pixels (Floyd-style dithering).
         let mut img: RgbaImage = ImageBuffer::from_pixel(16, 4, Rgba([128, 128, 128, 255]));
-        let params = DiffusionParams::new(0.75, 1.0, vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]);
+        let params =
+            DiffusionParams::new(0.75, 1.0, vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]);
         diffuse_in_place(&mut img, &params);
         let mut blacks = 0;
         let mut whites = 0;
@@ -126,7 +127,8 @@ mod tests {
     #[test]
     fn alpha_zero_is_identity() {
         let mut img: RgbaImage = ImageBuffer::from_pixel(4, 4, Rgba([100, 150, 200, 255]));
-        let params = DiffusionParams::new(1.0, 0.0, vec![[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]);
+        let params =
+            DiffusionParams::new(1.0, 0.0, vec![[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]);
         diffuse_in_place(&mut img, &params);
         for p in img.pixels() {
             assert!(p[0].abs_diff(100) <= 1);
@@ -138,7 +140,8 @@ mod tests {
     #[test]
     fn alpha_passes_through() {
         let mut img: RgbaImage = ImageBuffer::from_pixel(4, 4, Rgba([200, 200, 200, 64]));
-        let params = DiffusionParams::new(1.0, 1.0, vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]);
+        let params =
+            DiffusionParams::new(1.0, 1.0, vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]);
         diffuse_in_place(&mut img, &params);
         for p in img.pixels() {
             assert_eq!(p[3], 64);

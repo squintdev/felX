@@ -8,6 +8,6 @@ pub mod crt;
 pub mod crt_persistence;
 pub mod gain;
 pub mod invert;
-pub mod squint_diffusion;
 pub mod signal;
+pub mod squint_diffusion;
 pub mod vhs;
