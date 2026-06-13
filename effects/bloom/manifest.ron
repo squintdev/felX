@@ -1,0 +1,24 @@
+// Bloom — generic multi-pass bloom usable inside the CRT chain or as a
+// standalone glow effect (F-076).
+//
+// The Rust runtime drives multiple WGSL passes (threshold → blur ×N →
+// composite). The shader file here is the threshold + composite shader
+// pair invoked by the orchestrator; the blur is a standard separable
+// Gaussian baked into the runtime.
+(
+    id: "bloom",
+    display_name: "Bloom",
+    category: "Stylize",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (id: "threshold", display_name: "Threshold",
+         kind: Float(default: 0.7, range: (min: 0.0, max: 2.0))),
+        (id: "intensity", display_name: "Intensity",
+         kind: Float(default: 0.6, range: (min: 0.0, max: 4.0))),
+        (id: "radius", display_name: "Radius (px)",
+         kind: Float(default: 4.0, range: (min: 1.0, max: 32.0))),
+        (id: "soft_knee", display_name: "Soft Knee",
+         kind: Float(default: 0.3, range: (min: 0.0, max: 1.0))),
+    ],
+)

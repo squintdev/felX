@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main, mvp-branch]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned BtbN FFmpeg build for Windows runners. shared (DLL) variant so
+  # ffmpeg-the-third can pkg-config / link normally.
+  FFMPEG_WINDOWS_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FFmpeg dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libavfilter-dev libavdevice-dev \
+            libswscale-dev libswresample-dev \
+            libva-dev libdrm-dev pkg-config clang
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libavfilter-dev libavdevice-dev \
+            libswscale-dev libswresample-dev \
+            libva-dev libdrm-dev pkg-config clang
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "${{ env.FFMPEG_WINDOWS_URL }}"
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg-extract"
+          $root = (Get-ChildItem "$env:RUNNER_TEMP\ffmpeg-extract" -Directory | Select-Object -First 1).FullName
+          echo "FFMPEG_DIR=$root" >> $env:GITHUB_ENV
+          echo "$root\bin" >> $env:GITHUB_PATH
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets --no-fail-fast
+
+  wgpu-validation:
+    name: wgpu (lavapipe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Mesa Vulkan + FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-tools libvulkan1 \
+            ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libavfilter-dev libavdevice-dev \
+            libswscale-dev libswresample-dev \
+            libva-dev libdrm-dev pkg-config clang
+          vulkaninfo --summary || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests against software Vulkan adapter
+        env:
+          WGPU_BACKEND: vulkan
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: cargo test --workspace --all-targets --no-fail-fast

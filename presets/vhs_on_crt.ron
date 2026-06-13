@@ -1,0 +1,51 @@
+// The flagship "this is the look": Signal (analog signal artifacts) →
+// VHS (physical-tape artifacts) → CRT (display simulation). Order matters
+// per effects.md § canonical signal chain.
+(
+    name: "VHS on CRT",
+    description: "Signal → VHS tape artifacts → consumer Trinitron. The flagship glitch-art preset.",
+    effects: [
+        (
+            id: "signal",
+            values: {
+                "chroma_blur": Float(0.6),
+                "ringing_intensity": Float(0.7),
+                "snow_intensity": Float(0.05),
+                "composite_noise": Float(0.15),
+                "head_switch_height": Float(8.0),
+                "head_switch_shift": Float(4.0),
+                "seed": Int(42),
+            },
+        ),
+        (
+            id: "vhs",
+            values: {
+                "sync_wobble": Float(1.5),
+                "dropouts_density": Float(0.3),
+                "dropouts_polarity": Float(1.0),
+                "tape_damage": Float(0.25),
+                "transport_brightness": Float(0.15),
+                "transport_chroma_phase": Float(0.1),
+                "transport_freq": Float(0.4),
+                "vertical_scroll": Float(0.0),
+                "seed": Int(13),
+                "time_seconds": Float(0.0),
+            },
+        ),
+        (
+            id: "crt",
+            values: {
+                "curvature_x": Float(0.06),
+                "curvature_y": Float(0.08),
+                "scanline_intensity": Float(0.35),
+                "scanline_thickness": Float(0.6),
+                "mask_intensity": Float(0.45),
+                "mask_size": Float(3.0),
+                "mask_type": Enum("aperture_grille"),
+                "convergence_radial": Float(1.5),
+                "vignette_intensity": Float(0.4),
+                "vignette_softness": Float(0.4),
+            },
+        ),
+    ],
+)

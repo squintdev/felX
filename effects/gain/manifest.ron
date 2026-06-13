@@ -1,0 +1,15 @@
+// Effect manifest, parsed by felx-core::params::EffectManifest.
+(
+    id: "gain",
+    display_name: "Gain",
+    category: "Color",
+    working_space: linear,
+    pass: gpu,
+    parameters: [
+        (
+            id: "gain",
+            display_name: "Gain",
+            kind: Float(default: 1.0, range: (min: 0.0, max: 4.0)),
+        ),
+    ],
+)

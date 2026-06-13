@@ -1,0 +1,37 @@
+// CC Toner — multi-tone color mapping. Operates in sRGB-encoded space; the
+// compositor wraps the pass with felx_render::srgb_wrap.
+(
+    id: "cc_toner",
+    display_name: "CC Toner",
+    category: "Color",
+    working_space: srgb,
+    pass: gpu,
+    parameters: [
+        (
+            id: "tones",
+            display_name: "Tones",
+            kind: Enum(
+                variants: [
+                    (id: "solid", display_name: "Solid Color"),
+                    (id: "duotone", display_name: "Duotone"),
+                    (id: "tritone", display_name: "Tritone"),
+                    (id: "quadtone", display_name: "Quadtone"),
+                    (id: "pentone", display_name: "Pentone"),
+                ],
+                default: "tritone",
+            ),
+        ),
+        (id: "highlights", display_name: "Highlights",
+         kind: Color(default: (1.0, 1.0, 1.0, 1.0))),
+        (id: "brights", display_name: "Brights",
+         kind: Color(default: (0.75, 0.75, 0.75, 1.0))),
+        (id: "midtones", display_name: "Midtones",
+         kind: Color(default: (0.5, 0.5, 0.5, 1.0))),
+        (id: "darktones", display_name: "Darktones",
+         kind: Color(default: (0.25, 0.25, 0.25, 1.0))),
+        (id: "shadows", display_name: "Shadows",
+         kind: Color(default: (0.0, 0.0, 0.0, 1.0))),
+        (id: "blend", display_name: "Blend w. Original",
+         kind: Float(default: 0.0, range: (min: 0.0, max: 1.0))),
+    ],
+)

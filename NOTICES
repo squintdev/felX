@@ -1,0 +1,131 @@
+analog-felx — Third-Party Notices
+==================================
+
+This file lists third-party software incorporated into analog-felx and the
+licenses under which that software is distributed. analog-felx itself is
+dual-licensed under the MIT License and the Apache License, Version 2.0.
+See LICENSE-MIT and LICENSE-APACHE.
+
+----------------------------------------------------------------------------
+
+Rust crate dependencies
+-----------------------
+
+The following crates appear in analog-felx's dependency tree and ship
+inside the binary at link time. License text for each crate lives in
+that crate's source distribution; the entries below summarize the
+licensing posture and link to the canonical source.
+
+ffmpeg-the-third
+  URL:     https://github.com/shssoichiro/ffmpeg-the-third
+  License: WTFPL
+  Used for video decode, encode, and probing.
+
+FFmpeg
+  URL:     https://ffmpeg.org/
+  License: LGPL-2.1+ (the build configuration we link against). Some
+           optional libraries that FFmpeg can be configured with are
+           GPL-2+; we ship LGPL-only builds in our installers.
+  analog-felx links to FFmpeg's libraries (libavcodec, libavformat,
+  libavutil, libavfilter, libswscale, libswresample) at runtime. The
+  installer for each platform bundles those shared libraries; users may
+  alternatively use a system-installed FFmpeg.
+
+wgpu / wgpu-core / wgpu-hal / wgpu-types
+  URL:     https://github.com/gfx-rs/wgpu
+  License: MIT OR Apache-2.0
+  GPU abstraction layer.
+
+eframe / egui / egui_wgpu / egui-winit
+  URL:     https://github.com/emilk/egui
+  License: MIT OR Apache-2.0
+  Native window + immediate-mode UI framework.
+
+image
+  URL:     https://github.com/image-rs/image
+  License: MIT OR Apache-2.0
+  PNG / JPG / EXR codec support and image-buffer types.
+
+serde / serde_json
+  URL:     https://github.com/serde-rs/serde, https://github.com/serde-rs/json
+  License: MIT OR Apache-2.0
+  Serialization framework.
+
+ron
+  URL:     https://github.com/ron-rs/ron
+  License: MIT OR Apache-2.0
+  Rusty Object Notation — the project file format (see
+  docs/decisions/0001-project-file-format.md).
+
+tracing / tracing-subscriber
+  URL:     https://github.com/tokio-rs/tracing
+  License: MIT
+  Structured logging and diagnostics.
+
+bytemuck
+  URL:     https://github.com/Lokathor/bytemuck
+  License: Apache-2.0 OR MIT OR Zlib
+  Safe POD-to-bytes casting for shader uniforms.
+
+pollster
+  URL:     https://github.com/zesterer/pollster
+  License: Apache-2.0 OR MIT
+  Tiny block-on for async wgpu init outside an async runtime.
+
+notify
+  URL:     https://github.com/notify-rs/notify
+  License: CC0-1.0 OR Artistic-2.0
+  Filesystem watching for the WGSL hot-reload path.
+
+----------------------------------------------------------------------------
+
+Shader and algorithm prior art
+------------------------------
+
+analog-felx implements several effects whose visual character comes from
+prior art in the open-source video-effects community. Where a specific
+shader or algorithm informed an implementation, the reference is credited
+here even when it is in the public domain.
+
+CC Toner — clean-room reimplementation of the Cycore CC effects bundle's
+  CC Toner effect. The Cycore plugin itself is closed-source and shipped
+  with After Effects; analog-felx's implementation is independent and
+  derived from the publicly documented behavior. See
+  effects.md § CC Toner for the algorithm breakdown.
+
+Signal — F-071a landed; the effect is now a thin CPU-pass adapter over:
+    ntsc-rs by valadaptive
+      URL:     https://github.com/valadaptive/ntsc-rs
+      License: ntscrs core crate licensed MIT OR ISC OR Apache-2.0
+               (we depend only on the core crate). The standalone GUI
+               app is GPL-3.0 and not consumed.
+  Pinned to a specific commit; see Cargo.toml workspace dep.
+  ntsc-rs is itself a Rust port of zhuker/ntsc (Python) which derives
+  from joncampbell123/composite-video-simulator (C++). Credit to the
+  full lineage.
+
+SquintDiffusion — algorithm inspired by David van Brink's SquintDiffusion
+  AE plugin ((link removed)), which is
+  "Thanksware" (free for any use, attribution requested). Floyd-Steinberg
+  error diffusion (1976) is the underlying algorithm and is unencumbered.
+  Credit to van Brink for the directional-scan twist that gives the
+  effect its recognizable look.
+
+CRT — informed by the open-source CRT-shader community. Specific
+  references read for technique (no code copied):
+    crt-lottes by Timothy Lottes
+      Public domain. https://github.com/libretro/glsl-shaders/blob/master/crt/shaders/crt-lottes.glsl
+    Mattias Gustavsson's CRT view
+      MIT OR public-domain dual. https://github.com/mattiasgustavsson/crtview
+    MAME HLSL CRT shader
+      BSD-3-Clause. https://docs.mamedev.org/advanced/hlsl.html
+  The CRT-royale, crt-geom, and crt-easymode shaders are GPL and were
+  not used as reference for code; technique only.
+
+VHS — algorithm references:
+    valadaptive/ntsc-rs (Apache-2.0 core) for signal-domain artifact
+    descriptions.
+    libretro/glsl-shaders/vhs/shaders/vhs.glsl (GPL — read for technique
+    only, no code copied).
+    Various Shadertoy entries (CC-BY-NC-SA default — read for technique
+    only).

@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/felx-core",
+    "crates/felx-render",
+    "crates/felx-cli",
+    "crates/felx-app",
+    "crates/felx-media",
+    "crates/felx-test",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["SquintDev <thomas.edward.duffy@gmail.com>"]
+
+[workspace.dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+image = { version = "0.25", default-features = false, features = ["png", "exr"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.10"
+wgpu = "25"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+egui = "0.32"
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+notify = "8"
+ffmpeg-next = { package = "ffmpeg-the-third", version = "5" }
+cpal = "0.16"
+rfd = "0.16"
+# F-071a: the real ntsc-rs algorithm for the Signal effect. Not on
+# crates.io; pinned to a specific commit so the build is reproducible.
+ntscrs = { git = "https://github.com/valadaptive/ntsc-rs", package = "ntsc-rs", rev = "add90f5bf1bf7e3c573e4e945a16f44a82941b51" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

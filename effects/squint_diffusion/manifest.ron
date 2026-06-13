@@ -1,0 +1,30 @@
+// SquintDiffusion — directional error-diffusion halftoning. v1 supports
+// horizontal scan only; arbitrary angles via rotate-in/rotate-out land as
+// a follow-up.
+(
+    id: "squint_diffusion",
+    display_name: "SquintDiffusion",
+    category: "Stylize",
+    working_space: srgb,
+    pass: cpu,
+    parameters: [
+        (id: "error_weight", display_name: "Error Weight",
+         kind: Float(default: 0.75, range: (min: 0.0, max: 10.0))),
+        (id: "alpha", display_name: "Alpha",
+         kind: Float(default: 1.0, range: (min: 0.0, max: 1.0))),
+        (id: "num_colors", display_name: "Palette Size",
+         kind: Int(default: 4, range: (min: 2, max: 6))),
+        (id: "color_1", display_name: "Color 1",
+         kind: Color(default: (0.0, 0.0, 0.0, 1.0))),
+        (id: "color_2", display_name: "Color 2",
+         kind: Color(default: (1.0, 1.0, 1.0, 1.0))),
+        (id: "color_3", display_name: "Color 3",
+         kind: Color(default: (1.0, 0.0, 0.0, 1.0))),
+        (id: "color_4", display_name: "Color 4",
+         kind: Color(default: (0.0, 0.0, 1.0, 1.0))),
+        (id: "color_5", display_name: "Color 5",
+         kind: Color(default: (0.0, 1.0, 0.0, 1.0))),
+        (id: "color_6", display_name: "Color 6",
+         kind: Color(default: (1.0, 1.0, 0.0, 1.0))),
+    ],
+)

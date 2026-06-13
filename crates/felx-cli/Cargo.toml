@@ -1,0 +1,19 @@
+[package]
+name = "felx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Command-line interface for analog-felx (headless renders, project inspection)."
+publish = false
+
+[[bin]]
+name = "felx"
+path = "src/main.rs"
+
+[dependencies]
+felx-core = { path = "../felx-core" }
+felx-media = { path = "../felx-media" }
+felx-render = { path = "../felx-render" }
+tracing = { workspace = true }

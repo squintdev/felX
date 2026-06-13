@@ -1,0 +1,23 @@
+// 1980s arcade monitor: slot mask, harder scanlines, more curvature, more
+// convergence error.
+(
+    name: "CRT — Arcade Monitor",
+    description: "1980s arcade-cabinet CRT: slot mask, hard scanlines, lots of corner curvature.",
+    effects: [
+        (
+            id: "crt",
+            values: {
+                "curvature_x": Float(0.12),
+                "curvature_y": Float(0.16),
+                "scanline_intensity": Float(0.6),
+                "scanline_thickness": Float(0.3),
+                "mask_intensity": Float(0.7),
+                "mask_size": Float(4.0),
+                "mask_type": Enum("slot_mask"),
+                "convergence_radial": Float(3.5),
+                "vignette_intensity": Float(0.6),
+                "vignette_softness": Float(0.3),
+            },
+        ),
+    ],
+)

@@ -1,0 +1,16 @@
+[package]
+name = "felx-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Video decode / encode / probe for analog-felx, via rsmpeg + system FFmpeg."
+publish = false
+
+[dependencies]
+felx-core = { path = "../felx-core" }
+ffmpeg-next = { workspace = true }
+tracing = { workspace = true }
+ntscrs = { workspace = true }
+image = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "felx-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "wgpu-based render pipeline for analog-felx."
+publish = false
+
+[dependencies]
+felx-core = { path = "../felx-core" }
+felx-media = { path = "../felx-media" }
+tracing = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
+ffmpeg-next = { workspace = true }
+
+[dev-dependencies]
+felx-test = { path = "../felx-test" }
