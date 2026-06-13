@@ -20,6 +20,7 @@ mod renderer;
 pub mod srgb_wrap;
 pub mod texture_io;
 pub mod transform_pass;
+pub mod video_export;
 pub mod walker;
 
 pub use renderer::*;

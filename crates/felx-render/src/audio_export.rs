@@ -41,15 +41,16 @@ impl From<std::io::Error> for AudioExportError {
     }
 }
 
-/// Export the comp's audio bus to a WAV file at `master_rate`. Per-layer
-/// gain/pan are sampled from the layer's curves at each window start.
-pub fn export_wav(
+/// Mix the comp's full audio bus to interleaved stereo f32 at
+/// `master_rate`. Returns `None` when the comp has no Audio layers — the
+/// caller decides whether silence or no-track is appropriate. Mixes the
+/// entire timeline as one window; a streaming windowed pass is a
+/// follow-up for very long projects.
+pub fn mix_comp_audio(
     project: &Project,
     comp_id: CompId,
-    out_path: impl AsRef<Path>,
     master_rate: u32,
-    bit_depth: WavBitDepth,
-) -> Result<(), AudioExportError> {
+) -> Result<Option<Vec<f32>>, AudioExportError> {
     let comp = project
         .composition(comp_id)
         .ok_or(AudioExportError::UnknownComposition)?;
@@ -79,13 +80,10 @@ pub fn export_wav(
             });
         }
     }
-
     if sources.is_empty() {
-        info!("no audio layers; writing silent WAV of comp duration");
+        return Ok(None);
     }
 
-    // Mix the entire timeline as one window. Cheaper for short comps; a
-    // streaming windowed pass is a follow-up for very long projects.
     let total_secs = total_frames as f64 / framerate.as_fps();
     let window_frames = (total_secs * master_rate as f64).round() as usize;
     let bus = mix_window(
@@ -95,8 +93,31 @@ pub fn export_wav(
         window_frames,
         1.0,
     );
+    Ok(Some(bus.pcm))
+}
 
-    write_wav(out_path, &bus.pcm, bus.sample_rate, 2, bit_depth)?;
+/// Export the comp's audio bus to a WAV file at `master_rate`. Per-layer
+/// gain/pan are sampled from the layer's curves at each window start.
+pub fn export_wav(
+    project: &Project,
+    comp_id: CompId,
+    out_path: impl AsRef<Path>,
+    master_rate: u32,
+    bit_depth: WavBitDepth,
+) -> Result<(), AudioExportError> {
+    let comp = project
+        .composition(comp_id)
+        .ok_or(AudioExportError::UnknownComposition)?;
+    let pcm = match mix_comp_audio(project, comp_id, master_rate)? {
+        Some(pcm) => pcm,
+        None => {
+            info!("no audio layers; writing silent WAV of comp duration");
+            let total_secs = comp.duration_frames as f64 / comp.framerate.as_fps();
+            let frames = (total_secs * master_rate as f64).round() as usize;
+            vec![0.0; frames * 2]
+        }
+    };
+    write_wav(out_path, &pcm, master_rate, 2, bit_depth)?;
     Ok(())
 }
 

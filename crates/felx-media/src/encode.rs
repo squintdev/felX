@@ -16,7 +16,9 @@
 
 use crate::error::DecodeError;
 use ffmpeg_next as ffmpeg;
+use ffmpeg_next::ChannelLayoutMask;
 use ffmpeg_next::software::scaling;
+use ffmpeg_next::util::frame::audio::Audio as AudioFrame;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -122,6 +124,8 @@ impl EncodeOptions {
     pub fn h265_default(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Self {
         Self {
             codec: VideoCodec::H265,
+            // x265 profile names differ from x264 — there is no "high".
+            profile: "main".to_string(),
             ..Self::h264_default(width, height, fps_num, fps_den)
         }
     }
@@ -181,7 +185,10 @@ fn encoder_name_for(opts: &EncodeOptions) -> Option<&'static str> {
         (VideoCodec::H265, HwEncoder::Nvenc) => Some("hevc_nvenc"),
         (VideoCodec::H265, HwEncoder::Vaapi) => Some("hevc_vaapi"),
         (VideoCodec::H265, HwEncoder::VideoToolbox) => Some("hevc_videotoolbox"),
-        // ProRes has no hardware encoders we support.
+        // ProRes: always prores_ks — the codec-id default resolves to the
+        // Anatoliy encoder, which rejects the named profiles ("standard",
+        // "4444", …) our options surface uses. No hardware path.
+        (VideoCodec::Prores422 | VideoCodec::Prores4444, _) => Some("prores_ks"),
         _ => None,
     }
 }
@@ -202,6 +209,29 @@ fn pixel_format_id(name: &str) -> ffmpeg::format::Pixel {
     }
 }
 
+/// Options for the muxed audio track of a video export. Input samples are
+/// interleaved stereo f32 (the mixer's bus format) at `sample_rate`.
+/// Codec is derived from the video codec's container conventions:
+/// AAC for H.264/H.265 MP4, PCM s16 for ProRes MOV.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioEncodeOptions {
+    pub sample_rate: u32,
+}
+
+struct AudioStream {
+    encoder: ffmpeg::encoder::Audio,
+    stream_index: usize,
+    /// Interleaved stereo f32 samples awaiting a full encoder frame.
+    pending: Vec<f32>,
+    /// Per-channel samples sent so far — the audio pts clock at a
+    /// 1/sample_rate time base.
+    samples_sent: i64,
+    /// Per-channel samples per encoder frame (1024 for AAC; PCM encoders
+    /// report 0 = any, mapped to a fixed chunk).
+    frame_size: usize,
+    sample_rate: u32,
+}
+
 pub struct H264Encoder {
     output: ffmpeg::format::context::Output,
     encoder: ffmpeg::encoder::Video,
@@ -212,10 +242,21 @@ pub struct H264Encoder {
     finished: bool,
     fps_num: u32,
     fps_den: u32,
+    audio: Option<AudioStream>,
 }
 
 impl H264Encoder {
     pub fn create(path: impl AsRef<Path>, opts: EncodeOptions) -> Result<Self, DecodeError> {
+        Self::create_with_audio(path, opts, None)
+    }
+
+    /// Like [`create`](Self::create), additionally muxing an audio track.
+    /// Feed samples via [`write_audio_interleaved`](Self::write_audio_interleaved).
+    pub fn create_with_audio(
+        path: impl AsRef<Path>,
+        opts: EncodeOptions,
+        audio: Option<AudioEncodeOptions>,
+    ) -> Result<Self, DecodeError> {
         ffmpeg::init().map_err(DecodeError::Ffmpeg)?;
         let path = path.as_ref();
 
@@ -326,6 +367,17 @@ impl H264Encoder {
             scaling::Flags::BILINEAR,
         )?;
 
+        // Audio stream must be added before write_header.
+        let audio = match audio {
+            Some(aopts) => Some(Self::open_audio_stream(
+                &mut output,
+                &opts,
+                aopts,
+                global_header,
+            )?),
+            None => None,
+        };
+
         output.write_header()?;
 
         let frame_template = VideoFrame::new(pix_fmt, opts.width, opts.height);
@@ -350,7 +402,93 @@ impl H264Encoder {
             finished: false,
             fps_num: opts.framerate.0,
             fps_den: opts.framerate.1,
+            audio,
         })
+    }
+
+    fn open_audio_stream(
+        output: &mut ffmpeg::format::context::Output,
+        opts: &EncodeOptions,
+        aopts: AudioEncodeOptions,
+        global_header: bool,
+    ) -> Result<AudioStream, DecodeError> {
+        use ffmpeg::format::Sample;
+        use ffmpeg::format::sample::Type as PlanType;
+
+        // Container conventions: AAC inside MP4 (H.264/H.265), PCM s16
+        // inside MOV (ProRes).
+        let (codec_id, sample_format) = match opts.codec {
+            VideoCodec::H264 | VideoCodec::H265 => {
+                (ffmpeg::codec::Id::AAC, Sample::F32(PlanType::Planar))
+            }
+            VideoCodec::Prores422 | VideoCodec::Prores4444 => {
+                (ffmpeg::codec::Id::PCM_S16LE, Sample::I16(PlanType::Packed))
+            }
+        };
+        let codec = ffmpeg::encoder::find(codec_id)
+            .ok_or_else(|| DecodeError::UnsupportedCodec("audio".into()))?;
+
+        let mut stream = output.add_stream(codec)?;
+        let stream_index = stream.index();
+
+        let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
+            .encoder()
+            .audio()?;
+        let rate = aopts.sample_rate.max(1);
+        encoder.set_rate(rate as i32);
+        encoder.set_ch_layout(ffmpeg::ChannelLayout::STEREO);
+        encoder.set_format(sample_format);
+        encoder.set_time_base(ffmpeg::Rational::new(1, rate as i32));
+        if global_header {
+            encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
+        }
+
+        let encoder = encoder.open_as(codec)?;
+        let params: ffmpeg::codec::Parameters = (&encoder).into();
+        stream.set_parameters(params);
+        stream.set_time_base(ffmpeg::Rational::new(1, rate as i32));
+
+        // PCM encoders report frame_size 0 (any size); pick a fixed chunk.
+        let frame_size = match encoder.frame_size() {
+            0 => 1024,
+            n => n as usize,
+        };
+
+        info!(
+            codec = ?codec_id,
+            rate,
+            frame_size,
+            "audio encoder open"
+        );
+
+        Ok(AudioStream {
+            encoder,
+            stream_index,
+            pending: Vec::new(),
+            samples_sent: 0,
+            frame_size,
+            sample_rate: rate,
+        })
+    }
+
+    /// Queue interleaved stereo f32 samples for the audio track. Complete
+    /// encoder frames are sent immediately; a trailing partial frame is
+    /// held until [`finish`](Self::finish). No-op when the encoder was
+    /// created without an audio track.
+    pub fn write_audio_interleaved(&mut self, samples: &[f32]) -> Result<(), DecodeError> {
+        if self.finished {
+            return Ok(());
+        }
+        let Some(audio) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        audio.pending.extend_from_slice(samples);
+        let chunk_len = audio.frame_size * 2;
+        while audio.pending.len() >= chunk_len {
+            let chunk: Vec<f32> = audio.pending.drain(..chunk_len).collect();
+            send_audio_chunk(audio, &mut self.output, &chunk)?;
+        }
+        Ok(())
     }
 
     /// Push one RGBA8 frame. The slice must be `width * height * 4` bytes.
@@ -407,6 +545,15 @@ impl H264Encoder {
         if !self.finished {
             self.encoder.send_eof()?;
             self.drain_packets()?;
+            if let Some(audio) = self.audio.as_mut() {
+                // Flush the trailing partial frame, then the encoder.
+                if !audio.pending.is_empty() {
+                    let rest: Vec<f32> = std::mem::take(&mut audio.pending);
+                    send_audio_chunk(audio, &mut self.output, &rest)?;
+                }
+                audio.encoder.send_eof()?;
+                drain_audio_packets(audio, &mut self.output)?;
+            }
             self.output.write_trailer()?;
             self.finished = true;
             debug!(frames = self.frame_count, "encoder finished");
@@ -418,4 +565,67 @@ impl H264Encoder {
         drop(output);
         Ok(())
     }
+}
+
+/// Encode one chunk of interleaved stereo f32 samples. The chunk may be
+/// shorter than the encoder's frame size only for the final flush.
+fn send_audio_chunk(
+    audio: &mut AudioStream,
+    output: &mut ffmpeg::format::context::Output,
+    interleaved: &[f32],
+) -> Result<(), DecodeError> {
+    use ffmpeg::format::Sample;
+    use ffmpeg::format::sample::Type as PlanType;
+
+    let nsamples = interleaved.len() / 2;
+    if nsamples == 0 {
+        return Ok(());
+    }
+    let format = audio.encoder.format();
+    let mut frame = AudioFrame::new(format, nsamples, ChannelLayoutMask::STEREO);
+    frame.set_rate(audio.sample_rate);
+    match format {
+        Sample::F32(PlanType::Planar) => {
+            let left = frame.plane_mut::<f32>(0);
+            for (i, l) in left.iter_mut().enumerate().take(nsamples) {
+                *l = interleaved[i * 2];
+            }
+            let right = frame.plane_mut::<f32>(1);
+            for (i, r) in right.iter_mut().enumerate().take(nsamples) {
+                *r = interleaved[i * 2 + 1];
+            }
+        }
+        Sample::I16(PlanType::Packed) => {
+            // plane_mut's slice length is per-channel samples, too short
+            // for packed interleaved data — write through the byte view.
+            let data = frame.data_mut(0);
+            for (i, v) in interleaved.iter().enumerate() {
+                let s = (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                data[i * 2..i * 2 + 2].copy_from_slice(&s.to_le_bytes());
+            }
+        }
+        _ => return Err(DecodeError::Ffmpeg(ffmpeg::Error::InvalidData)),
+    }
+    frame.set_pts(Some(audio.samples_sent));
+    audio.samples_sent += nsamples as i64;
+    audio.encoder.send_frame(&frame)?;
+    drain_audio_packets(audio, output)
+}
+
+fn drain_audio_packets(
+    audio: &mut AudioStream,
+    output: &mut ffmpeg::format::context::Output,
+) -> Result<(), DecodeError> {
+    let mut packet = ffmpeg::Packet::empty();
+    let enc_tb = ffmpeg::Rational::new(1, audio.sample_rate as i32);
+    let stream_tb = output
+        .stream(audio.stream_index)
+        .map(|s| s.time_base())
+        .unwrap_or(enc_tb);
+    while audio.encoder.receive_packet(&mut packet).is_ok() {
+        packet.set_stream(audio.stream_index);
+        packet.rescale_ts(enc_tb, stream_tb);
+        packet.write_interleaved(output)?;
+    }
+    Ok(())
 }

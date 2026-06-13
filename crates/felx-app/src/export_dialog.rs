@@ -8,11 +8,11 @@
 //! channel that the GUI poll loop drains.
 
 use felx_core::model::{CompId, Project};
-use felx_media::{EncodeOptions, H264Encoder, HwEncoder, RateControl, VideoCodec, WavBitDepth};
+use felx_media::{EncodeOptions, HwEncoder, RateControl, VideoCodec, WavBitDepth};
 use felx_render::audio_export::export_wav;
 use felx_render::compositor::Compositor;
 use felx_render::gif_export::{GifDither, GifOptions, export_gif};
-use felx_render::texture_io::download_image;
+use felx_render::video_export::export_video;
 use felx_render::walker::{
     ExrSequenceOptions, PngSequenceOptions, render_to_exr_sequence, render_to_png_sequence,
 };
@@ -267,21 +267,17 @@ fn run_export(
             let _ = enc_opts.codec; // silence unused-import warnings if codec stays Video*
             let _: VideoCodec = enc_opts.codec;
 
-            let mut enc = H264Encoder::create(&out_path, enc_opts)
-                .map_err(|e| format!("encoder open: {e}"))?;
-            for frame in 0..dur {
-                let tex = compositor
-                    .render_cached(&project, comp_id, frame)
-                    .map_err(|e| format!("render frame {frame}: {e}"))?;
-                let img = download_image(compositor.renderer(), &tex);
-                enc.write_rgba(img.as_raw())
-                    .map_err(|e| format!("encode frame {frame}: {e}"))?;
-                let _ = tx.send(ExportProgress::Frame {
-                    done: frame + 1,
-                    total: dur,
-                });
-            }
-            enc.finish().map_err(|e| format!("finalize: {e}"))?;
+            export_video(
+                &mut compositor,
+                &project,
+                comp_id,
+                &out_path,
+                enc_opts,
+                |done, total| {
+                    let _ = tx.send(ExportProgress::Frame { done, total });
+                },
+            )
+            .map_err(|e| e.to_string())?;
         }
         ExportFormat::Gif => {
             // GIF export already renders the full PNG sequence internally
