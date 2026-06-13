@@ -24,6 +24,7 @@ The full **Graph editor** (toggle from the transport bar with `▲ Graph`) shows
 
 ## Layers
 
+- `Image` / `Video` / `Audio` import a media file as a new layer. Importing a **video** sizes the comp duration to the clip's length, and a clip with sound automatically gets a parallel Audio layer — its sound plays during preview and is muxed into video exports.
 - `+ Solid` adds a colored solid; `+ Adj` adds an Adjustment layer.
 - An **Adjustment** layer applies its effect stack to the flattened result of the layers beneath it (standard AE semantics).
 - **Time remap** (collapsing section) gives any Composition or Video layer a constant `offset (frames)` and `scale` (0.5 = half-speed, 2.0 = double, –1.0 = reverse).
@@ -58,16 +59,66 @@ Built-in presets (top of the GUI):
 
 Text-based RON. Asset paths under the project file's parent directory are stored relative; assets outside stay absolute. See [`docs/decisions/0001-project-file-format.md`](decisions/0001-project-file-format.md) for the format rationale.
 
-## Rendering
+## Rendering from the GUI
 
-Two paths to a final file:
+**File → Export…** opens the export dialog. Pick a format (H.264 / H.265 / ProRes 422 / ProRes 4444 / GIF / PNG sequence / EXR sequence / WAV), an output path, and quality knobs (CRF + preset for the lossy codecs, palette/dither for GIF). The export runs on a background thread with its own compositor, so the GUI stays responsive; a progress window tracks it.
 
-1. **CLI:** `cargo run -p felx-cli -- render <project.felx> --out <path> --format <fmt> [opts]`. `felx help` prints the full reference.
-2. **GUI:** the render queue panel (data + UI) is in place; the front-end "Add to queue" hookup is the next polish step.
+Video formats mux the comp's mixed audio bus automatically when the project has Audio layers (AAC inside MP4, PCM inside MOV). Comps without audio layers export video-only.
 
-Formats: `h264` / `h265` / `prores422` / `prores4444` / `gif` / `png` (sequence) / `exr` (sequence) / `wav`.
+**File → Settings…** lets you pin which GPU the viewer and exports each use (handy on dual-GPU machines); the `FELX_GPU` environment variable overrides both.
 
-Common encoder flags: `--crf` / `--bitrate` / `--max-bitrate` / `--preset` / `--profile` / `--gop` / `--hw <auto|nvenc|vaapi|videotoolbox>`. GIF: `--gif-palette 8..256`, `--gif-dither none|bayer|floyd|sierra`. WAV: `--wav-depth 16|24|f32`.
+(The render queue panel for batching multiple comps exists as a module but isn't wired into the UI yet — single exports go through File → Export.)
+
+## Rendering from the CLI
+
+The `felx` binary renders a `.felx` project headlessly — no window, no GPU contention with the GUI. To get a `.felx`, set up your comp in the GUI and **File → Save project**.
+
+```bash
+cargo run -p felx-cli -- render <project.felx> --out <path> --format <fmt> [opts]
+```
+
+`--comp <name>` picks a composition by name (default: the project's first).
+
+Examples for each format:
+
+```bash
+# H.264 MP4 (CRF quality mode), audio muxed if the comp has Audio layers
+felx render proj.felx --out out.mp4 --format h264 --crf 18 --preset slow
+
+# H.265 MP4 (note: x265 profiles are main/main10, not high)
+felx render proj.felx --out out.mp4 --format h265 --crf 22
+
+# Bitrate-targeted H.264 (CBR; add --max-bitrate for VBR)
+felx render proj.felx --out out.mp4 --format h264 --bitrate 8000000
+
+# ProRes 422 / 4444 in MOV (profile: proxy / lt / standard / hq / 4444)
+felx render proj.felx --out out.mov --format prores422 --profile hq
+felx render proj.felx --out out.mov --format prores4444
+
+# Animated GIF (two-pass palettegen/paletteuse)
+felx render proj.felx --out out.gif --format gif --gif-palette 64 --gif-dither floyd
+
+# PNG / EXR image sequences (--out is a directory)
+felx render proj.felx --out frames/ --format png --png-pattern 'frame_{frame:05}.png'
+felx render proj.felx --out frames/ --format exr
+
+# Audio-only WAV of the comp's mixed bus
+felx render proj.felx --out master.wav --format wav --wav-depth 24
+```
+
+Encoder flags (h264 / h265 / prores):
+
+| Flag | Meaning |
+|---|---|
+| `--crf <0..51>` | CRF quality target (h264/h265; lower = better, 18 ≈ visually lossless) |
+| `--bitrate <bps>` | Target bitrate — switches to CBR (or VBR with `--max-bitrate`) |
+| `--max-bitrate <bps>` | Max bitrate for VBR / VBV |
+| `--preset <name>` | Encoder speed/quality preset (`ultrafast`…`veryslow`) |
+| `--profile <name>` | `baseline`/`main`/`high` (h264), `main`/`main10` (h265), `proxy`/`lt`/`standard`/`hq`/`4444` (prores) |
+| `--gop <frames>` | Keyframe interval |
+| `--hw <auto\|nvenc\|vaapi\|videotoolbox>` | Hardware encoder; falls back to software if unavailable |
+
+`felx help` prints the same reference. Progress is reported as structured tracing events (target `felx::progress`), so scripts wrapping the CLI can scrape completion percentage.
 
 ## Keyboard shortcuts
 
@@ -88,7 +139,6 @@ Common encoder flags: `--crf` / `--bitrate` / `--max-bitrate` / `--preset` / `--
 
 ## See also
 
-- [PRD](../PRD.md) — vision, scope, decisions.
-- [`effects.md`](../effects.md) — per-effect concept notes and algorithm references.
 - [`docs/decisions/`](decisions/) — ADRs (project file format, UI framework).
 - [`NOTICES`](../NOTICES) — third-party attribution.
+- `effects/<id>/README.md` — per-effect parameter reference (also available from the GUI's Help menu).

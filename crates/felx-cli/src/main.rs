@@ -59,7 +59,7 @@ fn print_help() -> ExitCode {
          \t--bitrate <bps>           Target bitrate (CBR / VBR)\n\
          \t--max-bitrate <bps>       Max bitrate (VBR / VBV)\n\
          \t--preset <name>           Encoder preset (ultrafast..veryslow)\n\
-         \t--profile <name>          baseline / main / high (h264/h265),\n\
+         \t--profile <name>          baseline/main/high (h264), main/main10 (h265),\n\
          \t                          proxy/lt/standard/hq/4444 (prores)\n\
          \t--gop <frames>            Keyframe interval\n\
          \t--hw <auto|nvenc|vaapi|videotoolbox>\n\
